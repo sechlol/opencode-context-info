@@ -1,12 +1,16 @@
 /** @jsxImportSource @opentui/solid */
-// Presentational components for the stats dialog. All data arrives as a
+// Presentational components for the stats panel. All data arrives as a
 // ready-made StatsViewModel; this module owns no aggregation.
+//
+// The panel renders inside the host's session.panel container, which owns
+// sizing (flexGrow: 1; the full window in fullscreen presentation) and focus.
+// Colors come from semantic theme tokens via usePlugin() — no hardcoded hex.
 //
 // OpenTUI note: <text> accepts fg/attributes directly (TextOptions), but
 // <span> only honors style={{ fg, bg, attributes }} (see reconciler setProperty).
 
 import { ErrorBoundary, For, Show } from "solid-js"
-import { useTerminalDimensions } from "@opentui/solid"
+import { usePlugin } from "@opencode/plugin/tui"
 import type { StatsViewModel, StepRow } from "./types.ts"
 import { formatClock, formatCompact, formatCost, formatNumber, formatRange, truncateMiddle } from "./format.ts"
 import { STEP_ROWS } from "./stats.ts"
@@ -19,75 +23,109 @@ export type ViewState =
 export interface StatsViewProps {
   state: ViewState
   refreshing: boolean
+  /** Provided by the panel host (panel.close). */
+  onClose: () => void
+  /** Called for the `r` refresh binding (panel-scoped keymap layer). */
+  onRefresh: () => void
 }
 
-const DIM = "#888888"
-const FAINT = "#666666"
-const WARN = "#d29922"
-const ERR = "#f85149"
-const VALUE = "#adb5bd"
+type Theme = ReturnType<typeof usePlugin>["theme"]
+
+function useTones() {
+  const t = usePlugin().theme
+  return {
+    value: t.text.base,
+    dim: t.text.muted,
+    faint: t.text.faint,
+    warn: t.text.feedback.warning.base,
+    err: t.text.feedback.error.base,
+    bg: t.background.base,
+    border: t.border.base,
+  }
+}
+
+/**
+ * Category color from the theme's categorical hue scales
+ * (accent / interactive / neutral; steps 100..900). Deterministic per index.
+ */
+function categoryColor(theme: Theme, index: number) {
+  const steps = [500, 600, 400, 700, 300] as const
+  const scale = theme.categorical[index % theme.categorical.length]
+  if (!scale) return theme.text.muted
+  const hueName = Object.keys(scale)[0] as keyof typeof scale | undefined
+  if (!hueName) return theme.text.muted
+  const hue = scale[hueName]
+  if (!hue) return theme.text.muted
+  const step = steps[index % steps.length] as keyof typeof hue | undefined
+  return (step ? hue[step] : undefined) ?? theme.text.muted
+}
 
 function usageSum(u: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number }) {
   return u.input + u.output + u.reasoning + u.cacheRead + u.cacheWrite
 }
 
+type PanelTone = { toString(): string } | number | undefined
+
 /** Bar with the numeric value always adjacent (never color-only). */
-function Bar(props: { value: number; max: number; width?: number; color: string }) {
+function Bar(props: { value: number; max: number; width?: number; color: PanelTone; faint: PanelTone }) {
   const width = props.width ?? 20
   const filled = props.max > 0 ? Math.min(width, Math.max(0, Math.round((props.value / props.max) * width))) : 0
   return (
     <span>
       <span style={{ fg: props.color }}>{"█".repeat(filled)}</span>
-      <span style={{ fg: FAINT }}>{"░".repeat(width - filled)}</span>
+      <span style={{ fg: props.faint }}>{"░".repeat(width - filled)}</span>
     </span>
   )
 }
 
 function Header(props: { model: StatsViewModel }) {
+  const tones = useTones()
   const m = () => props.model
   const steps = () => m().attributedSteps + m().runningSteps
   return (
     <box flexDirection="column">
       <text attributes={1}>{m().title}</text>
-      <text fg={DIM}>
+      <text fg={tones.dim}>
         {m().status === "running" ? "running…" : "idle"} · {m().models.length} model
         {m().models.length === 1 ? "" : "s"} · {steps()} step{steps() === 1 ? "" : "s"}
       </text>
       <text>
         <span style={{ attributes: 1 }}>COST </span>
-        <span style={{ fg: VALUE }}>{formatCost(m().totalCost)}</span>
-        <span style={{ fg: DIM }}> · Σ reported </span>
+        <span style={{ fg: tones.value }}>{formatCost(m().totalCost)}</span>
+        <span style={{ fg: tones.dim }}> · Σ reported </span>
         <span>{formatNumber(usageSum(m().totals))}</span>
-        <span style={{ fg: FAINT }}> tk*</span>
+        <span style={{ fg: tones.faint }}> tk*</span>
       </text>
     </box>
   )
 }
 
 function Composition(props: { model: StatsViewModel }) {
+  const tones = useTones()
+  const theme = usePlugin().theme
   const m = () => props.model
   const max = () => Math.max(usageSum(m().totals), 1)
   const parts = () => [
-    { label: "INPUT", value: m().totals.input, color: "#79c0ff" },
-    { label: "OUTPUT", value: m().totals.output, color: "#7ee787" },
-    { label: "REASONING", value: m().totals.reasoning, color: "#d2a8ff" },
-    { label: "CACHE READ", value: m().totals.cacheRead, color: "#ffa657" },
-    { label: "CACHE WRITE", value: m().totals.cacheWrite, color: "#f0883e" },
+    { label: "INPUT", value: m().totals.input },
+    { label: "OUTPUT", value: m().totals.output },
+    { label: "REASONING", value: m().totals.reasoning },
+    { label: "CACHE READ", value: m().totals.cacheRead },
+    { label: "CACHE WRITE", value: m().totals.cacheWrite },
   ]
   return (
     <box flexDirection="column">
       <For each={parts()}>
-        {(p) => (
+        {(p, i) => (
           <text>
-            <span style={{ fg: DIM }}>{p.label.padEnd(13)}</span>
-            <Bar value={p.value} max={max()} color={p.color} />
+            <span style={{ fg: tones.dim }}>{p.label.padEnd(13)}</span>
+            <Bar value={p.value} max={max()} color={categoryColor(theme, i())} faint={tones.faint} />
             <span> {formatNumber(p.value).padStart(9)}</span>
           </text>
         )}
       </For>
-      <text fg={FAINT}>* categories may overlap by provider; cost is the comparable figure</text>
+      <text fg={tones.faint}>* categories may overlap by provider; cost is the comparable figure</text>
       <Show when={m().unattributedCost > 0.0001 || usageSum(m().unattributed) > 0}>
-        <text fg={WARN}>
+        <text fg={tones.warn}>
           other/auxiliary: {formatNumber(usageSum(m().unattributed))} tk · {formatCost(m().unattributedCost)}
         </text>
       </Show>
@@ -96,6 +134,8 @@ function Composition(props: { model: StatsViewModel }) {
 }
 
 function ContextWindow(props: { model: StatsViewModel }) {
+  const tones = useTones()
+  const theme = usePlugin().theme
   const c = () => props.model.context
   return (
     <Show when={c()}>
@@ -103,14 +143,14 @@ function ContextWindow(props: { model: StatsViewModel }) {
         <box flexDirection="column">
           <text attributes={1}>CONTEXT WINDOW</text>
           <text>
-            <Bar value={ctx().used} max={ctx().limit} color="#56d364" />
+            <Bar value={ctx().used} max={ctx().limit} color={categoryColor(theme, 1)} faint={tones.faint} />
             <span>
               {" "}
               {formatCompact(ctx().used)} / {formatCompact(ctx().limit)} (
               {Math.min(999, Math.round((ctx().used / ctx().limit) * 100))}%)
             </span>
           </text>
-          <text fg={FAINT}>last completed step's prompt · estimate</text>
+          <text fg={tones.faint}>last completed step's prompt · estimate</text>
         </box>
       )}
     </Show>
@@ -118,6 +158,7 @@ function ContextWindow(props: { model: StatsViewModel }) {
 }
 
 function ByModel(props: { model: StatsViewModel }) {
+  const tones = useTones()
   return (
     <Show when={props.model.models.length > 0}>
       <box flexDirection="column">
@@ -126,10 +167,10 @@ function ByModel(props: { model: StatsViewModel }) {
           {(m) => (
             <text>
               <span>{truncateMiddle(`${m.providerID}/${m.id}${m.variant ? `@${m.variant}` : ""}`, 34).padEnd(34)}</span>
-              <span style={{ fg: VALUE }}>{formatNumber(m.tokens).padStart(9)}</span>
+              <span style={{ fg: tones.value }}>{formatNumber(m.tokens).padStart(9)}</span>
               <span> tk </span>
-              <span style={{ fg: VALUE }}>{formatCost(m.cost).padStart(8)}</span>
-              <span style={{ fg: FAINT }}> {m.steps} steps</span>
+              <span style={{ fg: tones.value }}>{formatCost(m.cost).padStart(8)}</span>
+              <span style={{ fg: tones.faint }}> {m.steps} steps</span>
             </text>
           )}
         </For>
@@ -139,6 +180,7 @@ function ByModel(props: { model: StatsViewModel }) {
 }
 
 function Steps(props: { model: StatsViewModel }) {
+  const tones = useTones()
   const rows = (): StepRow[] => props.model.steps.slice(0, STEP_ROWS)
   return (
     <Show when={props.model.steps.length > 0}>
@@ -149,16 +191,16 @@ function Steps(props: { model: StatsViewModel }) {
         <For each={rows()}>
           {(s) => (
             <text>
-              <span style={{ fg: DIM }}>{formatClock(s.at)}</span>
+              <span style={{ fg: tones.dim }}>{formatClock(s.at)}</span>
               <span> {truncateMiddle(s.model, 24).padEnd(24)} </span>
               <Show
                 when={s.status === "ok"}
-                fallback={<span style={{ fg: WARN }}>{s.status === "running" ? "running…" : "error"}</span>}
+                fallback={<span style={{ fg: tones.warn }}>{s.status === "running" ? "running…" : "error"}</span>}
               >
-                <span style={{ fg: VALUE }}>{`in ${formatCompact(s.input)} out ${formatCompact(s.output)}`.padEnd(24)}</span>
+                <span style={{ fg: tones.value }}>{`in ${formatCompact(s.input)} out ${formatCompact(s.output)}`.padEnd(24)}</span>
                 <span>{formatCost(s.cost).padStart(8)}</span>
                 <Show when={s.toolCalls > 0}>
-                  <span style={{ fg: FAINT }}> {s.toolCalls} tools</span>
+                  <span style={{ fg: tones.faint }}> {s.toolCalls} tools</span>
                 </Show>
               </Show>
             </text>
@@ -170,6 +212,7 @@ function Steps(props: { model: StatsViewModel }) {
 }
 
 function Subagents(props: { model: StatsViewModel }) {
+  const tones = useTones()
   const total = () => props.model.subagents.reduce((n, s) => n + s.tokens, 0)
   return (
     <Show when={props.model.subagents.length > 0}>
@@ -181,19 +224,20 @@ function Subagents(props: { model: StatsViewModel }) {
           {(s) => (
             <text>
               <span>{truncateMiddle(s.title, 24).padEnd(24)}</span>
-              <span style={{ fg: VALUE }}>{formatNumber(s.tokens).padStart(9)}</span>
+              <span style={{ fg: tones.value }}>{formatNumber(s.tokens).padStart(9)}</span>
               <span> tk </span>
-              <span style={{ fg: VALUE }}>{formatCost(s.cost).padStart(8)}</span>
+              <span style={{ fg: tones.value }}>{formatCost(s.cost).padStart(8)}</span>
             </text>
           )}
         </For>
-        <text fg={FAINT}>reported for child sessions; not added to session totals</text>
+        <text fg={tones.faint}>reported for child sessions; not added to session totals</text>
       </box>
     </Show>
   )
 }
 
 function Project(props: { model: StatsViewModel }) {
+  const tones = useTones()
   const p = () => props.model.project
   return (
     <Show when={p()}>
@@ -205,7 +249,7 @@ function Project(props: { model: StatsViewModel }) {
             <span>{formatNumber(proj().tokens)} tk · </span>
             <span>{formatCost(proj().cost)}</span>
           </text>
-          <text fg={FAINT}>
+          <text fg={tones.faint}>
             {proj().prompts} prompts · {proj().steps} steps · {proj().subagents} subagents (incl. this session)
           </text>
         </box>
@@ -215,74 +259,50 @@ function Project(props: { model: StatsViewModel }) {
 }
 
 function Warnings(props: { model: StatsViewModel }) {
+  const tones = useTones()
   return (
     <Show when={props.model.warnings.length > 0}>
       <box flexDirection="column">
-        <For each={props.model.warnings}>{(w) => <text fg={WARN}>⚠ {w}</text>}</For>
+        <For each={props.model.warnings}>{(w) => <text fg={tones.warn}>⚠ {w}</text>}</For>
       </box>
     </Show>
   )
 }
 
 function Empty() {
+  const tones = useTones()
   return (
     <box flexDirection="column">
       <text>No usage recorded yet.</text>
-      <text fg={DIM}>Send a prompt, then run /tokens_usage again.</text>
+      <text fg={tones.dim}>Send a prompt, then run /tokens_usage again.</text>
     </box>
   )
 }
 
 export function StatsView(props: StatsViewProps) {
+  const tones = useTones()
   const model = () => (props.state.status === "ready" ? props.state.model : props.state.previous)
-  // We own the whole `app` slot, so we draw the modal ourselves: a full-window
-  // overlay with 15% margin on each side (85% of width), centered content.
-  // Reactive: re-lays out on terminal resize.
-  const dims = useTerminalDimensions()
-  const width = () => {
-    const w = dims().width
-    if (!w || w <= 0) return undefined
-    return Math.max(40, Math.floor(w * 0.85))
-  }
-  const height = () => {
-    const h = dims().height
-    if (!h || h <= 0) return undefined
-    // Leave a little vertical breathing room (a full-bleed modal hides the
-    // host chrome entirely; ~10% top+bottom combined keeps context visible).
-    return Math.max(12, Math.floor(h * 0.9))
-  }
+  // The host's session.panel container owns sizing (flexGrow: 1 → the full
+  // window in fullscreen presentation). We paint the background and let
+  // content flow; a scrollbox keeps long lists navigable in any height.
+  const tonesBg = tones.bg
   return (
     <ErrorBoundary
       fallback={(err) => (
-        <box flexDirection="column" padding={1}>
-          <text fg={ERR}>Failed to render stats: {String(err)}</text>
-          <text fg={DIM}>esc close</text>
+        <box flexDirection="column" padding={1} backgroundColor={tonesBg}>
+          <text fg={tones.err}>Failed to render stats: {String(err)}</text>
+          <text fg={tones.dim}>esc close</text>
         </box>
       )}
     >
-      <box
-        width="100%"
-        height="100%"
-        justifyContent="center"
-        alignItems="center"
-        backgroundColor="#00000066"
-      >
-        <box
-          flexDirection="column"
-          padding={1}
-          gap={1}
-          width={width()}
-          height={height()}
-          border
-          title="Token Usage"
-        >
+      <box flexDirection="column" flexGrow={1} backgroundColor={tonesBg} paddingLeft={2} paddingTop={1} gap={1}>
         <Show when={props.state.status === "loading" && !model()}>
-          <text fg={DIM}>Loading token usage…</text>
+          <text fg={tones.dim}>Loading token usage…</text>
         </Show>
         <Show when={props.state.status === "error" && !model()}>
           <box flexDirection="column">
-            <text fg={ERR}>{(props.state as { message: string }).message}</text>
-            <text fg={DIM}>esc close · r retry</text>
+            <text fg={tones.err}>{(props.state as { message: string }).message}</text>
+            <text fg={tones.dim}>esc close · r retry</text>
           </box>
         </Show>
         <Show when={model()}>
@@ -299,8 +319,7 @@ export function StatsView(props: StatsViewProps) {
             </Show>
           )}
         </Show>
-        <text fg={FAINT}>{props.refreshing ? "refreshing…" : "esc close · r refresh"}</text>
-        </box>
+        <text fg={tones.faint}>{props.refreshing ? "refreshing…" : "esc close · r refresh"}</text>
       </box>
     </ErrorBoundary>
   )
