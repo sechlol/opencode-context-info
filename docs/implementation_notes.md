@@ -85,8 +85,8 @@ export default Plugin.define({
 
     // 4) Custom dialog — show() takes a THUNK, not JSX
     ctx.ui.dialog.show(() => <MyView .../>, onClose)  // onClose = dispose your state
-    ctx.ui.dialog.set({ size: "xlarge" })   // MUST be called immediately AFTER show()
-                                             // returns — set-before-show is a silent
+    ctx.ui.dialog.set({ size: fittedDialogSize(ctx) }) // MUST be called immediately AFTER
+                                             // show() returns — set-before-show is a silent
                                              // no-op on 2.1.4 (the docs show the wrong
                                              // order; V9)
     ctx.ui.dialog.clear()                   // close it yourself (e.g. on escape)
@@ -207,10 +207,12 @@ Token-accounting lessons baked into `stats.ts`:
 > **Retraction.** An earlier revision of this document claimed that local paths in `cli.json`
 > (Attempt 1) and `opencode.json` (Attempt 2) were inert on 2.1.4. Both conclusions were
 > **disproven**: all config-file local-path forms work — absolute, `file://`, and relative, in
-> both `opencode.json` and `cli.json` (V1/V2). The original claims were a methodology error —
-> boot-only traces that never reached location activation, and watching a config file other
-> than the one the running process actually read. The two attempt write-ups have been removed;
-> see V1/V2 for the evidence.
+> both `opencode.json` and `cli.json` (V1/V2). For Attempt 2 the methodology error was pinned
+> down: a boot-only trace that never reached location activation (reproduced — an idle `serve`
+> logs no plugin lines at all, and `run` without a message exits before loading anything, V1).
+> For Attempt 1 the cause was never pinned down (plausible: inspecting a TUI that started
+> before the `cli.json` edit, or watching the wrong config file — V2). The two attempt
+> write-ups have been removed; see V1/V2 for the evidence.
 
 ### Attempt 3 — driving the TUI from scripts to "verify" the command
 
