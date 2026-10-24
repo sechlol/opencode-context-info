@@ -1,6 +1,7 @@
 # Discrepancies Verification — `docs/implementation_notes.md` vs the OpenCode v2 documentation
 
-> **Date:** 2026-10-24 (evening, +0300)
+> **Date:** 2026-10-24 (evening, +0300); additions on 2026-10-25 (V9, V10, dialog/scrollbox
+> follow-ups)
 > **Environment:** OpenCode **v2.1.4** (`opencode --version`; also npm `latest` for
 > `@opencode/plugin`, i.e. the same version the live docs at <https://opencode.ai/v2/docs>
 > describe), macOS, Node v24.22.0, npm 12.2.0.
@@ -29,10 +30,12 @@
 | V7 | §4.4: `dialog.show` takes a thunk (`render: () => JSX.Element`) | CLI docs example: `show(() => <box>…, onClose)` | **Both agree** (verified in installed `.d.ts`) |
 | V8 | §4.5: server `ctx.location.project.{id,directory,canonical}` vs bare/optional TUI `location` | `/build/plugins` shows `.project` on the server context | **Both agree** (verified in installed `.d.ts`) |
 | V9 | (n/a — found while implementing the stats dialog) | `dialog.set({size, centered})` is shown *before* `dialog.show()` | **Docs wrong — evidence captured** (set-before-show is a no-op on 2.1.4) |
+| V10 | (n/a — found during the `src/` refactor) | client types: `session.list` → `SessionsResponse = { data: SessionInfo[], cursor }` | **Docs/types correct — implementation wrong** (the code guessed a non-existent `res.sessions` shape; the selector always got `[]`; fixed) |
 
 **Net result:** 6 of the notes' documentation claims are disproven, 2 are confirmed accurate
-(V7/V8, both agreeing with the docs), and exactly **one real documentation error** was found
-(V4 — the peer-dependency example).
+(V7/V8, both agreeing with the docs), and exactly **two real documentation errors** were found
+(V4 — the peer-dependency example, and V9 — the `dialog.set` ordering example), plus one
+implementation bug found against the installed types (V10).
 
 ---
 
@@ -203,7 +206,7 @@ reporting alongside V4 (the docs don't say a directory lacking both is ignored, 
 
 ---
 
-## V4 — peer-dependency ranges (the one real docs error)
+## V4 — peer-dependency ranges (a real docs error)
 
 **Claim (notes §4.3):** the docs example pins `@opentui/core >=0.6.6`, but
 `@opencode/plugin@2.1.4` declares `>=0.6.8`, and npm hard-fails on the lower pin.
@@ -361,6 +364,10 @@ Conclusions:
   It applies only while a dialog is already active and mounting: immediately
   after `show()` returns, or inside the render thunk.
 - `show()` dialogs are horizontally centered even without `set({centered})`.
+- The host gives the dialog box **only a width** (plus `paddingTop`) — **no height** — inside a
+  full-screen overlay (binary inspection; the host's own dialogs bound their scrollboxes with
+  explicit `maxHeight`). Long custom-dialog content must therefore carry its own vertical
+  bound; a plain `flexGrow` scrollbox would never activate.
 - `set()` before the promise-based `select()` could not be measured (the
   select frame has no box borders to measure); it is *unverified*, and the
   stats selector was left at the host default size rather than guessing.
@@ -369,7 +376,13 @@ Conclusions:
 verified order (`show()` → `set()` immediately after) and picks the largest
 preset that fits the terminal via the typed `ctx.renderer.width`
 (medium/large/xlarge thresholds 92/120 cols), replacing the old
-"85%-of-terminal content box" workaround and the size-guessing comments.
+"85%-of-terminal content box" workaround and the size-guessing comments;
+`src/view.tsx` wraps the content in a `<scrollbox>` capped at a
+terminal-derived `maxHeight` (`renderer.height − 6` reserved rows, reactive to
+resize, omitted if the renderer is unavailable so content can never collapse).
+pyte-replayed transcripts confirmed: content occupies exactly `rows − 6`,
+clipped rows are never painted, the footer sits below the scroll region, the
+scrollbar thumb appears, `focused` scroll keys work, and ESC still closes.
 
 ### Report-ready evidence for the docs issue
 
@@ -386,6 +399,50 @@ preset that fits the terminal via the typed `ctx.renderer.width`
 > `set()` before `show()` queue the options for the next dialog.
 > **Also worth documenting:** preset widths are fixed columns (60/88/116), and
 > `show()` dialogs are horizontally centered by default.
+
+---
+
+## V10 — `client.session.list` response shape (implementation bug found against the types)
+
+**Discovered during the `src/` refactor:** `listRootSessions` in `src/data.ts` read the
+session list response as:
+
+```ts
+const sessions = (res as { sessions?: SessionInfo[]; data?: { sessions?: SessionInfo[] } })
+return sessions.sessions ?? sessions.data?.sessions ?? []
+```
+
+**What the installed types say** (`@opencode/client@2.1.4`, `client.d.ts`):
+
+```ts
+list(input?: SessionListInput, …): Promise<SessionsResponse>
+// types.d.ts:
+export type SessionsResponse = { data: Array<SessionInfo>; cursor: { previous?; next? } }
+```
+
+There is **no `sessions` key at either level** — `res.data` is the array itself.
+
+**Runtime confirmation** against the live service (docs' client example pattern
+`response.data`):
+
+```
+$ opencode api get /api/session --param limit=1
+top-level keys: ['data', 'cursor']
+data: list of 15 -> element keys: ['id', 'projectID', 'agent', 'model', 'cost', 'tokens', 'outcome', 'time']
+```
+
+**Consequence:** both guessed branches evaluated to `undefined`, so `listRootSessions`
+**always returned `[]`** — the home-screen session selector silently showed "No sessions in
+this project". The test mock encoded the same wrong guess (`list: () => Promise.resolve({ sessions: [] })`),
+which is why the test suite never caught it: guessing shapes in *both* code and fixtures
+defeats the point of having types.
+
+**Fix:** `return res.data` (typed), with two regression tests added (server-data path and the
+cache-fallback path), and the mock updated to the real `SessionsResponse` shape.
+
+**Verdict: docs and installed types were correct all along — the code was wrong.** This is the
+concrete cost of the habit the old notes warned about in the abstract: structural `as`-casts
+instead of typechecking against `@opencode/client`'s declarations.
 
 ---
 
@@ -447,12 +504,15 @@ loading-related implementation was refactored to the documented path:
 3. **`package.json` (unchanged, deliberately)** — its `>=0.6.8` peers + `@opencode/theme` match
    the installed package (V4 shows this is the *correct* side of the disagreement).
 
-4. **`docs/implementation_notes.md` (not touched)** — it carries an uncommitted edit by another
-   session; its §2/§4 loading claims are superseded by this document.
+4. **`docs/implementation_notes.md` (rewritten, 2026-10-25)** — corrected against V1–V10:
+   the disproven Attempt 1/2 write-ups and the wrong §4 items were deleted (retraction note
+   kept), §3 now describes the four verified loading mechanisms, §1.6 carries the hot-reload /
+   `plugin list` / location-activation truths, and §4 lists only the verified docs errors
+   (V4, V9, minor gaps).
 
 5. **`src/` alignment refactor (commit "Align src/ with documented APIs")** — `LoadContext`
    Pick-ed from the real `Context` type (casts removed), the broken `session.list` response
-   guess fixed (V9-era bug: the selector always got `[]`), discriminated-union narrowing
+   guess fixed (V10: the selector always got `[]`), discriminated-union narrowing
    instead of structural casts, context limit from the model registry instead of a
    max-across-models guess, and the documented `data.on` auto-refresh. Tests 35/35.
 
@@ -460,7 +520,13 @@ loading-related implementation was refactored to the documented path:
    moved from the fullscreen `session.panel` back to a **centered dialog** using the verified
    `show()` → `set()` order and a terminal-width preset picker (replacing the historical
    "85%-of-terminal content box" hack), fresh signals per open, an idempotent escape/close
-   path, and the dead `onClose` prop removed from `StatsView`.
+   path, and the dead `onClose` prop removed from `StatsView`. Long content is wrapped in a
+   `<scrollbox>` (commit "Wrap stats dialog content in a scrollbox"): because the host dialog
+   has **no height bound**, the scrollbox carries a terminal-derived `maxHeight`
+   (`renderer.height − 6` reserved rows, reactive to resize, `undefined` → unbounded flow when
+   the renderer is unavailable; `gap` routed through `contentOptions` since the scrollbox root
+   is a row layout). Verified via pyte-replayed transcripts: exact `rows − 6` clipping, footer
+   below the region, scrollbar thumb, `focused` scrolling, ESC unaffected.
 
 ## How to reproduce (quick reference)
 
@@ -479,6 +545,15 @@ mkdir t && cd t && npm init -y
 
 # V6: hot reload — add "plugins" entry to opencode.json while service runs →
 #   grep 'loading plugin' ~/.local/share/opencode/log/opencode.log → new entry appears, no restart
+
+# V9: dialog geometry — probe plugin auto-opens dialogs from setup() (no input driving):
+#   OPENCODE_CONFIG_DIR=<cfgdir> perl -e 'alarm 20; exec @ARGV' script -q <transcript> \
+#     sh -c 'stty cols 140 rows 40; exec opencode --print-logs --log-level warn'
+#   then replay the transcript through pyte (python venv) and measure border rows:
+#   set-before-show → all 60 cols; show→set immediately after → 60/88/116, re-centered.
+
+# V10: response shape — opencode api get /api/session --param limit=1
+#   → top-level keys ['data','cursor'] (no 'sessions' key anywhere)
 
 # Safety: never `pkill -f opencode`; self-terminate with `perl -e 'alarm N; exec @ARGV' …`
 # and kill only PIDs you spawned (verify with ps -o pid,lstart,command).

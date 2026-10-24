@@ -354,8 +354,13 @@ Only errors that survived independent verification — full evidence in
   `node_modules/@opentui/solid/index.js` → `setProperty`.
 - Size presets are fixed columns (60 / 88 / 116) — pick the largest that fits
   `ctx.renderer.width` (`>=120` → xlarge, `>=92` → large, else medium); don't guess terminal
-  proportions. Wrap long content in a `<scrollbox>` with the footer line outside it, and always
-  render the numeric value next to a bar (never color/length alone).
+  proportions. Wrap long content in a `<scrollbox>` with the footer line outside it: the host
+  dialog bounds only the **width** (no height), so the scrollbox must carry its own
+  terminal-derived `maxHeight` (e.g. `renderer.height` minus the rows reserved for paddings,
+  gap and footer; reactive to resize; omit the bound if the renderer is unavailable so content
+  flows instead of collapsing) — and route `gap` through `contentOptions`, because the
+  scrollbox root is a row layout (top-level `gap` would space wrapper↔scrollbar, not
+  sections). Always render the numeric value next to a bar (never color/length alone).
 - Use semantic theme tokens for coloring (`usePlugin().theme`) — the current code uses them
   throughout, including category colors from `theme.categorical`; if you ever fall back to hex,
   verify contrast in both light and dark themes.
@@ -394,8 +399,9 @@ Only errors that survived independent verification — full evidence in
 - Whether `dialog.set()` before the promise-based `select()` has any effect — **unverified**:
   the select frame has no measurable borders, so the stats selector was left at the host
   default size rather than guessing (V9).
-- Whether the host bounds dialog height such that the `<scrollbox>` actually activates on small
-  terminals — worth watching on 80×24.
+- Whether the terminal-derived scrollbox bound (`renderer.height − 6`) holds up on a small
+  80×24 terminal — the formula scales with the renderer, but measurements were taken at
+  140×40; mouse-wheel scrolling is also unverified (pty injection can't deliver it).
 - npm publish + `cli.json` package-name registration as the stable distribution path; the
   current config-path install stores the repo's absolute path, so it is machine-specific by
   design and must be re-run after a repo move.
