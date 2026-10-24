@@ -10,7 +10,7 @@ No message content leaves your machine.
 
 ## Install
 
-Requires **OpenCode v2.1.4+** (Node 22+ only for source installs).
+Requires **OpenCode v2.1.4+** (Node 22.6+ only for source installs).
 
 ### From npm
 
@@ -34,8 +34,8 @@ npm install
 ./install.sh
 ```
 
-`install.sh` registers the checkout's absolute path, so re-run it if you move the repo. Flags: `--dry-run`,
-`--config FILE`, `--uninstall`, `--help`.
+`install.sh` registers the checkout's absolute path in the global config, so re-run it if you move the repo. It is a
+thin wrapper around `scripts/install.ts`, which you can also run directly: `./scripts/install.ts [--uninstall]`.
 
 Register the plugin **once** — either by package name or by path, not both, and not in `cli.json`.
 
