@@ -23,7 +23,7 @@ A `/tokens_usage` TUI plugin for opencode v2 that:
 | Stats scope | **Session + subagents + project totals** (via `client.session.stats()`). |
 | Distribution | **Both**: README local-path install instructions **and** a v2-correct `install.sh`. |
 | Headline metric (rev 2) | **Cost is the headline number.** Token categories are shown as components with an explicit "sum of reported categories" label — no grand "TOTAL" that implies disjoint categories. A separate **CONTEXT** section answers "how full is my context window?" (the repo's identity). |
-| Install path (rev 2, amended rev 3) | Register in the user's **`opencode.json` `plugins`** array. Originally planned as `cli.json`; **rev 3 amendment**: `cli.json` local paths were tested on 2.1.4 and do not load (CLI reconciliation ignored the entry), so `opencode.json` is the verified path. Never both (double-load). |
+| Install path (rev 2 → rev 4) | Deploy a shim directory under `~/.config/opencode/plugins/` (`index.ts` + `tui.tsx` re-exporting the repo sources). Rev 3 tested `opencode.json` entries (ignored too); rev 4 settled on the directory-discovery mechanism, verified loading in a fresh standalone boot. |
 
 ## Research findings (verified against `@opencode/plugin@2.1.4` / `@opencode/client@2.1.4` type defs)
 
@@ -251,11 +251,15 @@ output; cached tokens may or may not be inside input). Therefore:
 
 ## 7. Distribution
 
-- **Verified install path (rev 3)**: the installer/README register the repo path in the user's
-  **`opencode.json` `plugins`** array — this is the form that loads on v2.1.4. **`cli.json` local
-  paths were tested and do NOT load**: the CLI plugin reconciliation on 2.1.4 only ran built-in
-  `opencode.*` TUI plugins; a `cli.json` local path entry was never discovered or set up
-  (observed in debug logs, 2026-10-24). `cli.example.json` was removed accordingly.
+- **Verified install path (rev 4)**: plugins load from *directories* under
+  `~/.config/opencode/plugins/` — the directory's `index.ts` is the server entry and a `tui.tsx`
+  at the directory root marks the TUI feature (binary `PluginModule.load` inspects the directory
+  and returns `{ server, tui?, rpc? }`). Config-file `plugins` entries pointing at local paths
+  were tested on 2.1.4 and are **ignored entirely** (trace-level logs of fresh standalone boots
+  show zero attempts to resolve them; neither `cli.json` nor `opencode.json`). `install.sh`
+  therefore deploys two one-line shim files (`index.ts`, `tui.tsx`) that re-export the repo's
+  `src/index.ts` / `src/tui.tsx`. Verified: fresh `run --standalone` boot logs
+  `loading plugin id=.../tokens-usage entrypoint=.../tokens-usage/index.ts` with no errors.
 - The installer **detects and warns** if the plugin is present in `cli.json` (double-load →
   duplicate commands/dialogs) instead of adding both.
 - Which local form loads on 2.1.4 (repo root honoring `exports["./tui"]` vs `./src/tui.tsx` vs a copied directory with `index.ts` + `tui.tsx`) is **explicitly tested in a sandbox config** during implementation; the winning form goes into README + installer.

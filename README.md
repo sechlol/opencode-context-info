@@ -40,47 +40,43 @@ LLM is involved.
 
 ## Install
 
-Requirements: OpenCode **v2.1.4+**, Node 22+ (only if you run the test suite), no tokenizer
-dependencies.
+Requirements: OpenCode **v2.1.4+**. No tokenizer dependencies, no LLM usage.
 
-Close OpenCode first (it rewrites its config itself and holds a lock).
+Close OpenCode first, then:
 
 ```bash
 git clone <this-repo-url> && cd opencode-context-info
-./install.sh            # registers the plugin path in opencode.json
+./install.sh            # deploys plugin shims into ~/.config/opencode/plugins/
 ```
 
 `install.sh` flags: `--dry-run`, `--target DIR`, `--uninstall`, `--help`.
-It edits only `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json`, preserves existing
-settings and plugin entries (string or object form), backs up the file first, and refuses to
-rewrite files containing JSONC comments (it prints the snippet to add instead).
 
-> Why not `cli.json`? OpenCode v2.1.4 does not load local plugin paths from the global CLI
-> config's `plugins` array (verified on this machine — the CLI reconciliation never picked it
-> up). The `opencode.json` `plugins` entry is the form that loads the `./tui` export.
+> **Why shims?** Verified on v2.1.4: plugins auto-load from *directories* under
+> `~/.config/opencode/plugins/` (the directory's `index.ts` is the server entry;
+> a `tui.tsx` at the directory root marks the TUI feature). Registering local
+> paths in `cli.json` or `opencode.json` `plugins` arrays was tested and is
+> **not applied** by v2.1.4, so the installer writes two one-line shim files
+> that re-export this repo's `src/index.ts` and `src/tui.tsx` instead.
 
-If `OPENCODE_CONFIG_CONTENT` is set, its `plugins` array **replaces** the file's array — the
-installer warns and prints the manual snippet.
-
-### Manual install
-
-Add the absolute path of this repo to the `plugins` array of your `opencode.json(c)`:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": ["/absolute/path/to/opencode-context-info"]
-}
-```
+The shims reference the repo by absolute path — if you move the repo, re-run
+`./install.sh`. Publishing the package to npm and registering it by name is the
+stable long-term option.
 
 ### Do not double-register
 
-Register this plugin in **`opencode.json` only**. It also must **not** be added to the global
-`cli.json` — loading it from both configs double-loads the TUI entry (duplicate `/tokens_usage`
-commands and dialogs). The installer warns if it detects a duplicate in `cli.json`.
+Do not also add this repo to `cli.json` or `opencode.json` `plugins` — if config
+entries gain local-path support in a future version, that would double-load the
+TUI entry (duplicate `/tokens_usage` commands). The installer warns if it finds
+stale config references.
 
-Because the absolute path is machine-specific, moving the repo breaks the install — re-run
-`./install.sh` after moving, or publish the package to npm and register it by name instead.
+## Uninstall
+
+```bash
+./install.sh --uninstall
+```
+
+If you registered the repo in `cli.json`/`opencode.json` during earlier attempts,
+remove those entries too.
 
 ## Verify
 
