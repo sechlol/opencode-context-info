@@ -235,15 +235,21 @@ function Empty() {
 
 export function StatsView(props: StatsViewProps) {
   const model = () => (props.state.status === "ready" ? props.state.model : props.state.previous)
-  // Host dialog presets are fixed widths (medium 60 / large 88 / xlarge 116
-  // columns), so to honor "adapt to the window", size our own content box:
-  // 85% of the terminal width (≈15% margin per side), clamped to what the
-  // host's xlarge container allows. Reactive: re-renders on terminal resize.
+  // We own the whole `app` slot, so we draw the modal ourselves: a full-window
+  // overlay with 15% margin on each side (85% of width), centered content.
+  // Reactive: re-lays out on terminal resize.
   const dims = useTerminalDimensions()
-  const contentWidth = () => {
+  const width = () => {
     const w = dims().width
     if (!w || w <= 0) return undefined
-    return Math.max(40, Math.min(Math.floor(w * 0.85), w - 2))
+    return Math.max(40, Math.floor(w * 0.85))
+  }
+  const height = () => {
+    const h = dims().height
+    if (!h || h <= 0) return undefined
+    // Leave a little vertical breathing room (a full-bleed modal hides the
+    // host chrome entirely; ~10% top+bottom combined keeps context visible).
+    return Math.max(12, Math.floor(h * 0.9))
   }
   return (
     <ErrorBoundary
@@ -254,7 +260,22 @@ export function StatsView(props: StatsViewProps) {
         </box>
       )}
     >
-      <box flexDirection="column" padding={1} gap={1} width={contentWidth()}>
+      <box
+        width="100%"
+        height="100%"
+        justifyContent="center"
+        alignItems="center"
+        backgroundColor="#00000066"
+      >
+        <box
+          flexDirection="column"
+          padding={1}
+          gap={1}
+          width={width()}
+          height={height()}
+          border
+          title="Token Usage"
+        >
         <Show when={props.state.status === "loading" && !model()}>
           <text fg={DIM}>Loading token usage…</text>
         </Show>
@@ -279,6 +300,7 @@ export function StatsView(props: StatsViewProps) {
           )}
         </Show>
         <text fg={FAINT}>{props.refreshing ? "refreshing…" : "esc close · r refresh"}</text>
+        </box>
       </box>
     </ErrorBoundary>
   )

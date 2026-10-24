@@ -77,14 +77,6 @@ async function show(ctx: TuiContext): Promise<void> {
   await showSelector(ctx)
 }
 
-function dialogSize(_ctx: TuiContext): "xlarge" {
-  // The host maps DialogSize presets to FIXED widths (medium 60 / large 88 /
-  // xlarge 116 columns) — not fractions of the terminal. StatsView therefore
-  // sizes its own content box to 85% of the terminal (see view.tsx); here we
-  // just request the largest container so wide terminals aren't capped at 116.
-  return "xlarge"
-}
-
 async function showStats(ctx: TuiContext, sessionID: string): Promise<void> {
   const generation = ++runGeneration
   dialogOpen = true
@@ -92,8 +84,21 @@ async function showStats(ctx: TuiContext, sessionID: string): Promise<void> {
   const [state, setState] = createSignal<ViewState>({ status: "loading" })
   const [refreshing, setRefreshing] = createSignal(false)
 
+  // Render into the `app` slot REPLACING host content: the host's dialog
+  // container maps size presets to FIXED widths (medium 60 / large 88 /
+  // xlarge 116 columns) and its show() resets size/centered internally, so a
+  // host dialog cannot fill the screen. Owning the app slot lets StatsView
+  // draw a full-window overlay with its own centering and 85% width.
+  // disposeAppSlot restores the host UI and runs the same cleanup as onClose.
+  let disposeAppSlot: (() => void) | undefined
   const close = () => {
-    ctx.ui.dialog.clear()
+    disposeAppSlot?.()
+  }
+
+  const cleanup = () => {
+    dialogOpen = false
+    runGeneration++ // cancel in-flight refreshes
+    disposeAppSlot = undefined
   }
 
   const load = async (isRefresh: boolean) => {
@@ -127,13 +132,7 @@ async function showStats(ctx: TuiContext, sessionID: string): Promise<void> {
     return // user navigated away mid-load
   }
 
-  // centered: true — vertically/horizontally centered instead of bottom-docked.
-  // size: pick the largest preset that fits the terminal (the host owns the
-  // exact pixel mapping; DialogSize has no percentage option).
-  ctx.ui.dialog.set({ size: dialogSize(ctx), centered: true })
-  // In-dialog keymap layer: escape closes (NOT guaranteed for custom dialogs),
-  // r refreshes. mode: "global" because the layer default is "base" and a
-  // dialog may not be in that mode.
+  // In-dialog keymap layer: escape closes, r refreshes.
   ctx.keymap.layer(() => ({
     mode: "global",
     priority: 100,
@@ -154,17 +153,15 @@ async function showStats(ctx: TuiContext, sessionID: string): Promise<void> {
     bindings: ["tokens-usage.close", "tokens-usage.refresh"],
   }))
 
-  ctx.ui.dialog.show(
-    () => (
+  disposeAppSlot = ctx.ui.slot({
+    replace: "app",
+    render: () => (
       <Show when={dialogOpen}>
         <StatsView state={state()} refreshing={refreshing()} />
       </Show>
     ),
-    () => {
-      dialogOpen = false
-      runGeneration++ // cancel in-flight refreshes
-    },
-  )
+  })
+  if (!dialogOpen) return // closed synchronously (e.g. disposed immediately)
 
   async function refresh() {
     if (refreshing()) return
@@ -214,7 +211,9 @@ async function showSelector(ctx: TuiContext): Promise<void> {
     }
   })
 
-  ctx.ui.dialog.set({ size: dialogSize(ctx), centered: true })
+  // The host's dialog select() resets size/centered internally, so set the
+  // presentation AFTER opening (set applies to the active dialog).
+  ctx.ui.dialog.set({ size: "xlarge", centered: true })
   const selected = await ctx.ui.dialog.select({
     title: "Token usage — select a session",
     options,
