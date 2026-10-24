@@ -6,6 +6,7 @@
 // <span> only honors style={{ fg, bg, attributes }} (see reconciler setProperty).
 
 import { ErrorBoundary, For, Show } from "solid-js"
+import { useTerminalDimensions } from "@opentui/solid"
 import type { StatsViewModel, StepRow } from "./types.ts"
 import { formatClock, formatCompact, formatCost, formatNumber, formatRange, truncateMiddle } from "./format.ts"
 import { STEP_ROWS } from "./stats.ts"
@@ -234,6 +235,16 @@ function Empty() {
 
 export function StatsView(props: StatsViewProps) {
   const model = () => (props.state.status === "ready" ? props.state.model : props.state.previous)
+  // Host dialog presets are fixed widths (medium 60 / large 88 / xlarge 116
+  // columns), so to honor "adapt to the window", size our own content box:
+  // 85% of the terminal width (≈15% margin per side), clamped to what the
+  // host's xlarge container allows. Reactive: re-renders on terminal resize.
+  const dims = useTerminalDimensions()
+  const contentWidth = () => {
+    const w = dims().width
+    if (!w || w <= 0) return undefined
+    return Math.max(40, Math.min(Math.floor(w * 0.85), w - 2))
+  }
   return (
     <ErrorBoundary
       fallback={(err) => (
@@ -243,7 +254,7 @@ export function StatsView(props: StatsViewProps) {
         </box>
       )}
     >
-      <box flexDirection="column" padding={1} gap={1}>
+      <box flexDirection="column" padding={1} gap={1} width={contentWidth()}>
         <Show when={props.state.status === "loading" && !model()}>
           <text fg={DIM}>Loading token usage…</text>
         </Show>

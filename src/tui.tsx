@@ -77,20 +77,11 @@ async function show(ctx: TuiContext): Promise<void> {
   await showSelector(ctx)
 }
 
-function dialogSize(ctx: TuiContext): "medium" | "large" | "xlarge" {
-  // The host maps DialogSize presets to fractions of the terminal width, so
-  // picking the preset by terminal width is how the dialog "adapts to the
-  // current window". Thresholds leave roughly a 15% margin on each side.
-  try {
-    const r = ctx.renderer as unknown as { columns?: number; width?: number }
-    const cols = r.columns ?? r.width ?? 0
-    if (cols > 0) {
-      if (cols < 70) return "medium"
-      if (cols < 140) return "large"
-    }
-  } catch {
-    // fall through to xlarge
-  }
+function dialogSize(_ctx: TuiContext): "xlarge" {
+  // The host maps DialogSize presets to FIXED widths (medium 60 / large 88 /
+  // xlarge 116 columns) — not fractions of the terminal. StatsView therefore
+  // sizes its own content box to 85% of the terminal (see view.tsx); here we
+  // just request the largest container so wide terminals aren't capped at 116.
   return "xlarge"
 }
 
