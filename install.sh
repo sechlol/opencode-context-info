@@ -1,31 +1,36 @@
 #!/usr/bin/env bash
 # Installer for the opencode-tokens-usage plugin.
 #
-# Mechanism: register this repository as a local plugin directory in the
-# global opencode.json `plugins` array — the documented Configure path
-# (https://opencode.ai/v2/docs/plugins). Verified live on OpenCode v2.1.4
-# (see docs/discrepancies_verification.md):
-#   * The server loads the directory's `index` module (root index.ts shim)
-#     and reports the directory to the CLI, which then loads its `tui.tsx`
-#     automatically — no cli.json entry is needed
-#     (https://opencode.ai/v2/docs/cli/plugins).
+# Two registration modes, both editing the global opencode.json `plugins`
+# array (the documented Configure path, https://opencode.ai/v2/docs/build/plugins):
+#
+#   ./install.sh --package   register the published npm package by name
+#                            ("opencode-tokens-usage") — recommended
+#   ./install.sh             register this checkout by absolute path (dev)
+#
+# Mechanism, verified live on OpenCode v2.1.4 (see docs/discrepancies_verification.md):
+#   * The server loads the plugin's `exports["."]` entry and reports the plugin
+#     to the CLI, which loads `exports["./tui"]` automatically — no cli.json
+#     entry is needed. If the TUI loads the package, both entries resolve from
+#     the same node_modules, so runtime dependencies are shared.
 #   * Config edits hot-reload in the running service; no service restart.
 #     If the slash command does not appear, run /reload in the TUI.
-# Directory auto-discovery under ~/.config/opencode/plugins/ also works and
-# is documented, but config registration needs no generated shim files.
-# This installer migrates away from the older generated-shim layout.
 #
 # Usage:
-#   ./install.sh [--config FILE] [--legacy-dir DIR] [--dry-run] [--uninstall]
+#   ./install.sh [--package] [--config FILE] [--legacy-dir DIR]
+#                [--dry-run] [--uninstall]
 #
 # Defaults:
 #   config     = ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json
 #   legacy-dir = ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/tokens-usage
 #
-# Note: the registration stores this repo's absolute path. Moving the repo
-# breaks the plugin — re-run ./install.sh after moving (the old entry is
-# replaced only on reinstall; remove it with --uninstall first if desired).
+# Local mode stores this checkout's absolute path; moving the repo breaks the
+# registration — re-run ./install.sh (or switch to --package).
+# Installing either mode removes the other registration so the plugin cannot
+# load twice; --uninstall removes both.
 set -euo pipefail
+
+PACKAGE="opencode-tokens-usage"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if command -v realpath >/dev/null 2>&1; then
@@ -36,15 +41,28 @@ fi
 
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
 LEGACY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/tokens-usage"
+MODE="local"
 DRY_RUN=0
 UNINSTALL=0
 
 usage() {
-  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+  cat <<'EOF'
+Usage: ./install.sh [options]
+
+  --package        register the npm package "opencode-tokens-usage" instead of
+                   this checkout (no clone or npm install needed)
+  --config FILE    opencode.json to edit
+                   (default: ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json)
+  --legacy-dir DIR directory of the old generated shims, removed if present
+  --dry-run        print what would change, edit nothing
+  --uninstall      remove the registration(s) again
+  -h, --help       show this help
+EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --package)   MODE="package"; shift ;;
     --config)    CONFIG="$2"; shift 2 ;;
     --legacy-dir) LEGACY_DIR="$2"; shift 2 ;;
     --dry-run)   DRY_RUN=1; shift ;;
@@ -54,12 +72,23 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-echo "Repo:          $REPO"
+if [[ "$MODE" == "package" ]]; then
+  ENTRY="$PACKAGE"
+else
+  ENTRY="$REPO"
+fi
+
+echo "Mode:          $MODE"
+echo "Entry:         $ENTRY"
 echo "Config file:   $CONFIG"
 
-if [[ ! -f "$REPO/src/tui.tsx" || ! -f "$REPO/src/index.ts" || ! -f "$REPO/index.ts" || ! -f "$REPO/tui.tsx" ]]; then
+if [[ "$MODE" == "local" ]] && [[ ! -f "$REPO/src/tui.tsx" || ! -f "$REPO/src/index.ts" || ! -f "$REPO/index.ts" || ! -f "$REPO/tui.tsx" ]]; then
   echo "error: plugin entry files not found (expected src/tui.tsx, src/index.ts, index.ts, tui.tsx next to install.sh)" >&2
   exit 1
+fi
+
+if [[ "$MODE" == "local" && ! -d "$REPO/node_modules/@opencode/plugin" ]]; then
+  echo "note: dependencies are not installed; run 'npm install' in $REPO first" >&2
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -72,10 +101,10 @@ fi
 # Exits 2 if the config exists but is not valid JSON (never corrupt it).
 edit_config() {
   local mode="$1"
-  python3 - "$CONFIG" "$REPO" "$mode" <<'PYEOF'
+  python3 - "$CONFIG" "$ENTRY" "$REPO" "$PACKAGE" "$mode" <<'PYEOF'
 import json, os, sys, tempfile, stat
 
-cfg, repo, mode = sys.argv[1:4]
+cfg, entry, repo, package, mode = sys.argv[1:6]
 raw = open(cfg, encoding="utf-8").read() if os.path.exists(cfg) else "{}"
 try:
     doc = json.loads(raw) if raw.strip() else {}
@@ -86,49 +115,56 @@ if not isinstance(doc, dict):
     print(f"error: {cfg} does not contain a JSON object; refusing to modify it", file=sys.stderr)
     sys.exit(2)
 
-def matches(entry):
-    return entry == repo or (isinstance(entry, dict) and entry.get("package") == repo)
+def matches(item, target):
+    return item == target or (isinstance(item, dict) and item.get("package") == target)
+
+def set_plugins(entries):
+    if entries:
+        doc["plugins"] = entries
+    else:
+        doc.pop("plugins", None)
+
+def save():
+    st = os.stat(cfg) if os.path.exists(cfg) else None
+    directory = os.path.dirname(cfg) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2)
+            fh.write("\n")
+        if st is not None:
+            os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        os.replace(tmp, cfg)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 plugins = doc.get("plugins")
 if plugins is None:
     plugins = []
-    doc["plugins"] = plugins
 if not isinstance(plugins, list):
     print(f"error: {cfg}: 'plugins' is not an array; refusing to modify it", file=sys.stderr)
     sys.exit(2)
 
 if mode == "add":
-    if any(matches(e) for e in plugins):
-        print("already-registered")
-        sys.exit(0)
-    plugins.append(repo)
-    action = "added"
+    already = any(matches(e, entry) for e in plugins)
+    # Drop both known registrations, then add the requested one, so the plugin
+    # can never be registered twice (once by path, once by package name).
+    kept = [e for e in plugins if not any(matches(e, t) for t in (repo, package))]
+    if not any(matches(e, entry) for e in kept):
+        kept.append(entry)
+    set_plugins(kept)
+    save()
+    print("already-registered" if already else "added")
 else:
-    kept = [e for e in plugins if not matches(e)]
+    kept = [e for e in plugins if not any(matches(e, t) for t in (repo, package))]
     if len(kept) == len(plugins):
         print("absent")
         sys.exit(0)
-    if kept:
-        doc["plugins"] = kept
-    else:
-        doc.pop("plugins", None)
-    action = "removed"
-
-st = os.stat(cfg) if os.path.exists(cfg) else None
-directory = os.path.dirname(cfg) or "."
-fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, indent=2)
-        fh.write("\n")
-    if st is not None:
-        os.chmod(tmp, stat.S_IMODE(st.st_mode))
-    os.replace(tmp, cfg)
-except BaseException:
-    if os.path.exists(tmp):
-        os.unlink(tmp)
-    raise
-print(action)
+    set_plugins(kept)
+    save()
+    print("removed")
 PYEOF
 }
 
@@ -156,7 +192,7 @@ if [[ "$UNINSTALL" == "1" ]]; then
   if [[ ! -f "$CONFIG" ]]; then
     echo "Nothing to uninstall: $CONFIG does not exist."
   elif [[ "$DRY_RUN" == "1" ]]; then
-    echo "[dry-run] would remove $REPO from $CONFIG plugins"
+    echo "[dry-run] would remove '$PACKAGE' and '$REPO' from $CONFIG plugins"
   else
     case "$(edit_config remove)" in
       removed) echo "Removed plugin registration from $CONFIG" ;;
@@ -171,7 +207,7 @@ fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "[dry-run] would register in $CONFIG plugins:"
-  echo "  \"$REPO\""
+  echo "  \"$ENTRY\""
   clean_legacy
   exit 0
 fi
@@ -183,4 +219,8 @@ case "$(edit_config add)" in
   *) echo "error: config not modified" >&2; exit 1 ;;
 esac
 clean_legacy
-echo "Done. The config hot-reloads — run /reload in the TUI if /tokens_usage is not listed."
+if [[ "$MODE" == "local" ]]; then
+  echo "Done. The config hot-reloads — run /reload in the TUI if /tokens_usage is not listed."
+else
+  echo "Done. OpenCode installs the package and the config hot-reloads — run /reload in the TUI if /tokens_usage is not listed."
+fi

@@ -1,30 +1,54 @@
 {
   "name": "opencode-tokens-usage",
-  "version": "0.1.0",
-  "description": "Token usage statistics for OpenCode v2 sessions — /tokens_usage, no LLM in the loop",
+  "version": "1.0.0",
+  "description": "/tokens_usage, cost and context-window statistics for OpenCode v2 sessions",
   "type": "module",
   "license": "MIT",
+  "homepage": "https://github.com/sechlol/opencode-context-info#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sechlol/opencode-context-info.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sechlol/opencode-context-info/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-tui",
+    "tokens",
+    "usage",
+    "cost",
+    "context-window",
+    "telemetry"
+  ],
   "exports": {
     ".": "./src/index.ts",
-    "./tui": "./src/tui.tsx"
+    "./tui": "./src/tui.tsx",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "index.ts",
+    "tui.tsx"
+  ],
+  "engines": {
+    "node": ">=22"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/*.test.ts\"",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "prepack": "npm run check"
   },
   "dependencies": {
     "@opencode/client": "^2.1.4",
     "@opencode/plugin": "^2.1.4"
   },
   "peerDependencies": {
-    "@opencode/theme": "2.1.4",
     "@opentui/core": ">=0.6.8",
     "@opentui/solid": ">=0.6.8",
     "solid-js": ">=1.9.0"
-  },
-  "engines": {
-    "node": ">=22"
   },
   "devDependencies": {
     "@opentui/core": "^0.6.8",
@@ -32,5 +56,12 @@
     "@types/node": "^26.6.5",
     "solid-js": "^1.9.12",
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "seroval": "1.6.12",
+    "seroval-plugins": "1.6.12"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

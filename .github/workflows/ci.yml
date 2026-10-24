@@ -6,11 +6,20 @@ on:
 
 jobs:
   check:
+    name: check (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is the advertised floor in package.json; 26 matches @opentui/core.
+        node: [22, 26]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
       - run: npm install
       - run: npm run check
+      - run: bash -n install.sh
+      # Verify the package can be packed with the expected file list.
+      - run: npm pack --dry-run --ignore-scripts

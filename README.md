@@ -4,7 +4,9 @@ Adds a <code>/tokens_usage</code> command to OpenCode that shows what a session 
 cost, a per-category token breakdown, and how full the context window is. Script-based only, no LLM in the loop.
 No message content leaves your machine.
 
-<img src="https://raw.githubusercontent.com/sechlol/opencode-context-info/main/docs/info.png" alt="Token usage dialog: cost, token categories and context window" width="600" />
+<div align="center">
+  <img src="docs/info.png" alt="Token usage dialog: cost, token categories and context window" width="600" />
+</div>
 
 ## Install
 
@@ -21,7 +23,7 @@ Add the package to the `plugins` array in `~/.config/opencode/opencode.json`:
 }
 ```
 
-Save the file — OpenCode installs and loads the plugin. To pin a version, use `"opencode-tokens-usage@0.1.0"`.
+Save the file — OpenCode installs and loads the plugin. To pin a version, use `"opencode-tokens-usage@1.0.0"`.
 
 ### Manual (local checkout)
 
