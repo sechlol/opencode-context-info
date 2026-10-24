@@ -77,13 +77,19 @@ async function show(ctx: TuiContext): Promise<void> {
   await showSelector(ctx)
 }
 
-function dialogSize(ctx: TuiContext): "large" | "xlarge" {
+function dialogSize(ctx: TuiContext): "medium" | "large" | "xlarge" {
+  // The host maps DialogSize presets to fractions of the terminal width, so
+  // picking the preset by terminal width is how the dialog "adapts to the
+  // current window". Thresholds leave roughly a 15% margin on each side.
   try {
     const r = ctx.renderer as unknown as { columns?: number; width?: number }
     const cols = r.columns ?? r.width ?? 0
-    if (cols > 0 && cols < 110) return "large"
+    if (cols > 0) {
+      if (cols < 70) return "medium"
+      if (cols < 140) return "large"
+    }
   } catch {
-    // default to xlarge
+    // fall through to xlarge
   }
   return "xlarge"
 }
@@ -130,7 +136,10 @@ async function showStats(ctx: TuiContext, sessionID: string): Promise<void> {
     return // user navigated away mid-load
   }
 
-  ctx.ui.dialog.set({ size: dialogSize(ctx) })
+  // centered: true — vertically/horizontally centered instead of bottom-docked.
+  // size: pick the largest preset that fits the terminal (the host owns the
+  // exact pixel mapping; DialogSize has no percentage option).
+  ctx.ui.dialog.set({ size: dialogSize(ctx), centered: true })
   // In-dialog keymap layer: escape closes (NOT guaranteed for custom dialogs),
   // r refreshes. mode: "global" because the layer default is "base" and a
   // dialog may not be in that mode.
@@ -214,6 +223,7 @@ async function showSelector(ctx: TuiContext): Promise<void> {
     }
   })
 
+  ctx.ui.dialog.set({ size: dialogSize(ctx), centered: true })
   const selected = await ctx.ui.dialog.select({
     title: "Token usage — select a session",
     options,
@@ -223,6 +233,7 @@ async function showSelector(ctx: TuiContext): Promise<void> {
       return opts.filter((o) => o.title.toLowerCase().includes(q))
     },
   })
+
   if (!selected) return
   await showStats(ctx, selected)
 }
