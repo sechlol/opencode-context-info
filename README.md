@@ -4,9 +4,7 @@ Adds a <code>/tokens_usage</code> command to OpenCode that shows what a session 
 cost, a per-category token breakdown, and how full the context window is. Script-based only, no LLM in the loop.
 No message content leaves your machine.
 
-<p align="center">
-  <img src="docs/info.png" alt="Token usage dialog: cost, token categories and context window" width="600" />
-</p>
+<img src="https://raw.githubusercontent.com/sechlol/opencode-context-info/main/docs/info.png" alt="Token usage dialog: cost, token categories and context window" width="600" />
 
 ## Install
 
