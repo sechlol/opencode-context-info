@@ -28,6 +28,7 @@
 | V6 | §1.6/§5: the service *caches* config; you must restart the **service** after config changes | Reload: "Changes under watched config directories reload automatically" | **Docs correct — notes wrong** (hot-reload proven on the live service) |
 | V7 | §4.4: `dialog.show` takes a thunk (`render: () => JSX.Element`) | CLI docs example: `show(() => <box>…, onClose)` | **Both agree** (verified in installed `.d.ts`) |
 | V8 | §4.5: server `ctx.location.project.{id,directory,canonical}` vs bare/optional TUI `location` | `/build/plugins` shows `.project` on the server context | **Both agree** (verified in installed `.d.ts`) |
+| V9 | (n/a — found while implementing the stats dialog) | `dialog.set({size, centered})` is shown *before* `dialog.show()` | **Docs wrong — evidence captured** (set-before-show is a no-op on 2.1.4) |
 
 **Net result:** 6 of the notes' documentation claims are disproven, 2 are confirmed accurate
 (V7/V8, both agreeing with the docs), and exactly **one real documentation error** was found
@@ -324,6 +325,70 @@ that — but the categorical "must restart the service" claim is false for confi
 
 ---
 
+## V9 — `dialog.set()` ordering and size presets (found 2026-10-25)
+
+**Docs (`/v2/docs/build/plugins/cli` → Dialogs and toasts):**
+
+```ts
+context.ui.dialog.set({ size: "large", centered: true })
+context.ui.dialog.show(() => (<box>…</box>), onClose)
+```
+
+i.e. `set()` is shown **before** `show()`.
+
+**How verified:** a throwaway probe plugin (isolated config dir, global
+`plugins/` discovery) auto-opened dialogs of every size from `setup()` — no
+input driving — while the TUI ran in a `script` pty (`stty cols 140 rows 40`),
+and the raw transcripts were replayed through a `pyte` terminal emulator to
+measure the *rendered* frames exactly (border row → left offset and width).
+
+**Evidence (140×40 pty, emulator-measured):**
+
+| probe | `set()` timing | rendered result |
+|---|---|---|
+| geom-b | **before** `show()` (docs order) | all sizes → **width 60** (default); no effect |
+| geom-c | **synchronously right after** `show()` returns | medium → 60 @ left 40, large → **88 @ left 26**, xlarge → **116 @ left 12** — all exactly centered |
+| geom-d | 80 ms after `show()` | all → 60; no effect |
+| geom-e | inside the render thunk | 116 @ left 12 — works |
+| geom-e | no `set()` at all (default) | 60 @ left 40 — **already horizontally centered by default** |
+
+Conclusions:
+
+- **Presets are fixed column widths** — medium 60 / large 88 / xlarge 116 —
+  *not* fractions of the terminal (settles a contradiction between two
+  comments in this repo's own history).
+- **`set()` before `show()` (the documented order) is silently ignored.**
+  It applies only while a dialog is already active and mounting: immediately
+  after `show()` returns, or inside the render thunk.
+- `show()` dialogs are horizontally centered even without `set({centered})`.
+- `set()` before the promise-based `select()` could not be measured (the
+  select frame has no box borders to measure); it is *unverified*, and the
+  stats selector was left at the host default size rather than guessing.
+
+**Consequence for this repo:** `src/tui.tsx` opens the stats dialog with the
+verified order (`show()` → `set()` immediately after) and picks the largest
+preset that fits the terminal via the typed `ctx.renderer.width`
+(medium/large/xlarge thresholds 92/120 cols), replacing the old
+"85%-of-terminal content box" workaround and the size-guessing comments.
+
+### Report-ready evidence for the docs issue
+
+> **Page:** <https://opencode.ai/v2/docs/build/plugins/cli> ("Dialogs and toasts",
+> custom JSX dialog example)
+> **Problem:** the example calls `context.ui.dialog.set({ size, centered })`
+> *before* `context.ui.dialog.show(...)`. On OpenCode 2.1.4 this ordering has no
+> effect: dialogs stay on the default 60-column preset regardless of `size`
+> (measured with emulator-replayed pty transcripts; four probe variants,
+> orders: before/immediately-after/80 ms-after/inside-render). Calling `set()`
+> **immediately after `show()` returns** applies size and re-centers correctly
+> (60/88/116 on 140 cols, left 40/26/12 = exact centering).
+> **Suggested fix:** show the example as `show(...); set(...)` — or make
+> `set()` before `show()` queue the options for the next dialog.
+> **Also worth documenting:** preset widths are fixed columns (60/88/116), and
+> `show()` dialogs are horizontally centered by default.
+
+---
+
 ## V7 / V8 — API-shape claims (both agree with the docs)
 
 Verified against the **installed** type definitions (the notes' own recommended method), in
@@ -382,11 +447,20 @@ loading-related implementation was refactored to the documented path:
 3. **`package.json` (unchanged, deliberately)** — its `>=0.6.8` peers + `@opencode/theme` match
    the installed package (V4 shows this is the *correct* side of the disagreement).
 
-4. **`docs/implementation_notes.md` (not touched)** — it carries an unrelated uncommitted edit
-   by another session; its §2/§4 loading claims are superseded by this document. Also **`src/`
-   was not touched**: a parallel session was actively refactoring `src/tui.tsx` during this
-   verification (commit `40850e5` landed mid-test, and its uncommitted WIP currently has
-   typecheck errors — unrelated to these changes; the test suite passes 30/30).
+4. **`docs/implementation_notes.md` (not touched)** — it carries an uncommitted edit by another
+   session; its §2/§4 loading claims are superseded by this document.
+
+5. **`src/` alignment refactor (commit "Align src/ with documented APIs")** — `LoadContext`
+   Pick-ed from the real `Context` type (casts removed), the broken `session.list` response
+   guess fixed (V9-era bug: the selector always got `[]`), discriminated-union narrowing
+   instead of structural casts, context limit from the model registry instead of a
+   max-across-models guess, and the documented `data.on` auto-refresh. Tests 35/35.
+
+6. **Stats dialog presentation (2026-10-25, V9 follow-up)** — `src/tui.tsx` + `src/view.tsx`
+   moved from the fullscreen `session.panel` back to a **centered dialog** using the verified
+   `show()` → `set()` order and a terminal-width preset picker (replacing the historical
+   "85%-of-terminal content box" hack), fresh signals per open, an idempotent escape/close
+   path, and the dead `onClose` prop removed from `StatsView`.
 
 ## How to reproduce (quick reference)
 

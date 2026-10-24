@@ -1,14 +1,19 @@
 /** @jsxImportSource @opentui/solid */
-// CLI plugin entry: /tokens_usage command, route detection, selector, panel.
-// Pure script — no LLM anywhere.
+// CLI plugin entry: /tokens_usage command, session selector, centered stats
+// dialog. Pure script — no LLM anywhere.
 //
-// Presentation uses the documented session-panel mechanism (v2 docs,
-// "Session panels"): a `session.panel` slot contribution renders the stats,
-// and the command opens it with `ui.panel.open(name, { presentation:
-// "fullscreen" })`. The host owns sizing, focus, and full-screen layout
-// (it also hides the sidebar); the plugin owns its contents.
+// Presentation uses the documented dialog mechanism (v2 docs, "Dialogs and
+// toasts"). One verified deviation from the docs example: `dialog.set()` must
+// be called IMMEDIATELY AFTER `dialog.show()`, not before it as the docs show
+// — on 2.1.4 set-before-show is a no-op (all dialogs stay on the default
+// 60-col preset), while show-then-set applies size and re-centers. Verified
+// empirically; see docs/discrepancies_verification.md.
+//
+// Size presets are fixed column widths (medium 60 / large 88 / xlarge 116),
+// so fittedDialogSize() picks the largest preset that fits the terminal —
+// no content-width hacks, no terminal-dimension probing in the view.
 
-import { createEffect, createSignal, Show } from "solid-js"
+import { createSignal } from "solid-js"
 import { Plugin, usePlugin as usePluginTui } from "@opencode/plugin/tui"
 import type { Context } from "@opencode/plugin/tui/context"
 import type { SessionInfo } from "@opencode/client"
@@ -18,61 +23,43 @@ import { StatsView, type ViewState } from "./view.tsx"
 import { formatCompact, formatCost, formatRelative } from "./format.ts"
 import { usageTotal } from "./types.ts"
 
-/** Panel name for this plugin's stats contribution (plugin-prefixed). */
-const PANEL_NAME = "loaf.tokens-usage.stats"
+/** Set while the stats dialog is open; consulted by the setup-level event hook. */
+let dialogOpen = false
+let activeSessionID: string | undefined
+let activeRefresh: (() => void) | undefined
+/** Escape-close for the active dialog; set while the stats dialog is open. */
+let requestClose: (() => void) | undefined
 
 export default Plugin.define({
   id: "loaf.tokens-usage",
   setup(ctx) {
-    // Register the panel contribution once at setup; it renders only when
-    // this panel is selected (host passes panel.name to every contribution).
-    ctx.ui.slot({
-      append: "session.panel",
-      render: (panel) => (
-        <Show when={panel.name === PANEL_NAME}>
-          <PanelHost panel={panel} />
-        </Show>
-      ),
-    })
+    ctx.keymap.layer(() => ({
+      mode: "global",
+      commands: [
+        {
+          id: "tokens-usage.show",
+          title: "Show token usage",
+          group: "Tokens",
+          description: "Session token statistics and cost, no LLM involved",
+          palette: true,
+          slash: { name: "tokens_usage", aliases: ["usage"] },
+          run: () => {
+            void show(ctx)
+          },
+        },
+      ],
+    }))
 
-    // Command layer lives on an app-slot component so it is disposed and
-    // re-created with the plugin lifecycle per the docs' example pattern.
-    ctx.ui.slot({
-      append: "app",
-      render: () => {
-        ctx.keymap.layer(() => ({
-          mode: "global",
-          commands: [
-            {
-              id: "tokens-usage.show",
-              title: "Show token usage",
-              group: "Tokens",
-              description: "Session token statistics and cost, no LLM involved",
-              palette: true,
-              slash: { name: "tokens_usage", aliases: ["usage"] },
-              run: () => {
-                void show(ctx)
-              },
-            },
-          ],
-        }))
-        return null
-      },
-    })
-
-    // Documented event API (docs: Events → data.on): refresh the open panel
-    // when a run finishes, debounced so batched events coalesce. Unsubscribes
-    // via the cleanup returned from setup.
+    // Documented event API (docs: Events → data.on): refresh the open dialog
+    // when a run in ITS session finishes, debounced so batched events
+    // coalesce. Unsubscribed via the cleanup returned from setup.
     let refreshTimer: ReturnType<typeof setTimeout> | undefined
     const stop = ctx.data.on("session.execution.succeeded", (event) => {
-      if (event.data.sessionID !== panelSessionID) return
-      if (ctx.ui.panel.current()?.name !== PANEL_NAME) return
+      if (!dialogOpen || event.data.sessionID !== activeSessionID) return
       if (refreshTimer !== undefined) clearTimeout(refreshTimer)
       refreshTimer = setTimeout(() => {
         refreshTimer = undefined
-        if (panelSessionID && ctx.ui.panel.current()?.name === PANEL_NAME) {
-          void refreshPanel(ctx, panelSessionID)
-        }
+        if (dialogOpen) activeRefresh?.()
       }, 500)
     })
     return () => {
@@ -83,60 +70,8 @@ export default Plugin.define({
 })
 
 // ---------------------------------------------------------------------------
-// Panel wiring: one stats session at a time, shared via module-level signals.
+// Dialog lifecycle: fresh signals per open, no stale-session flashes.
 // ---------------------------------------------------------------------------
-
-const [panelState, setPanelState] = createSignal<ViewState>({ status: "loading" })
-const [panelRefreshing, setPanelRefreshing] = createSignal(false)
-let panelSessionID: string | undefined
-let panelGeneration = 0
-
-function PanelHost(props: {
-  panel: { sessionID: string; close: () => void; focused: boolean }
-}) {
-  const ctx = usePluginTui()
-  // Mounting/re-targeting the contribution means the panel is open for this
-  // sessionID. Kick a load for a newly opened session — as an effect, so the
-  // fetch never runs as a render-phase side effect. If the panel was reopened
-  // for a different session, also re-target the module-level session so the
-  // `r` binding and event refreshes act on the right session.
-  createEffect(() => {
-    const sid = props.panel.sessionID
-    if (sid !== panelSessionID) {
-      panelSessionID = sid
-      void refreshPanel(ctx, sid)
-    }
-  })
-  // Panel-scoped keymap layer: active only while the panel owns input
-  // (docs: "Its keyboard layers ... are active only while the panel owns
-  // input"), and disposed automatically when the panel closes.
-  ctx.keymap.layer(() => ({
-    mode: "global",
-    priority: 100,
-    commands: [
-      { id: "tokens-usage.close", bind: "escape", run: () => props.panel.close() },
-      {
-        id: "tokens-usage.refresh",
-        bind: "r",
-        run: () => {
-          if (panelSessionID) void refreshPanel(ctx, panelSessionID)
-        },
-      },
-    ],
-    bindings: ["tokens-usage.close", "tokens-usage.refresh"],
-  }))
-  return (
-    <StatsView
-      state={panelState()}
-      refreshing={panelRefreshing()}
-      onClose={props.panel.close}
-      onRefresh={() => {
-        if (panelSessionID) void refreshPanel(ctx, panelSessionID)
-      }}
-    />
-  )
-}
-
 
 function currentSessionID(ctx: Context): string | undefined {
   try {
@@ -148,53 +83,102 @@ function currentSessionID(ctx: Context): string | undefined {
   }
 }
 
-async function show(ctx: Context): Promise<void> {
-  if (ctx.ui.panel.current()?.name === PANEL_NAME) return // already open
-  const sessionID = currentSessionID(ctx)
-  if (sessionID) {
-    openPanelFor(ctx, sessionID)
-    return
+/** Largest fixed preset that fits the terminal (presets are 60/88/116 cols). */
+function fittedDialogSize(ctx: Context): "medium" | "large" | "xlarge" {
+  try {
+    const cols = ctx.renderer.width
+    if (cols >= 120) return "xlarge"
+    if (cols >= 92) return "large"
+  } catch {
+    // renderer not ready — fall through
   }
-  await showSelector(ctx)
+  return "medium"
+}
+
+async function show(ctx: Context): Promise<void> {
+  if (dialogOpen) return // one stats dialog at a time
+  const sessionID = currentSessionID(ctx) ?? (await showSelector(ctx))
+  if (sessionID) openStatsDialog(ctx, sessionID)
+}
+
+function openStatsDialog(ctx: Context, sessionID: string): void {
+  dialogOpen = true
+  activeSessionID = sessionID
+
+  const [state, setState] = createSignal<ViewState>({ status: "loading" })
+  const [refreshing, setRefreshing] = createSignal(false)
+  let generation = 0
+
+  const load = async (isRefresh: boolean): Promise<void> => {
+    const gen = ++generation
+    if (isRefresh && state().status === "ready") setRefreshing(true)
+    try {
+      ctx.data.session.message.invalidate(sessionID)
+      const snapshot = await loadSnapshot(ctx, sessionID)
+      if (gen !== generation) return // stale
+      setState({ status: "ready", model: buildViewModel(snapshot) })
+    } catch (error) {
+      if (gen !== generation) return
+      setState({
+        status: "error",
+        message: error instanceof Error ? error.message : String(error),
+      })
+    } finally {
+      if (gen === generation) setRefreshing(false)
+    }
+  }
+
+  activeRefresh = () => {
+    void load(true)
+  }
+
+  // Idempotent state reset — used both as show()'s onClose and (together
+  // with clear()) by the escape binding, so reopening works whether or not
+  // clear() ends up invoking onClose.
+  const reset = () => {
+    dialogOpen = false
+    activeSessionID = undefined
+    activeRefresh = undefined
+    requestClose = undefined
+    generation++ // cancel in-flight loads
+  }
+  requestClose = () => {
+    reset()
+    ctx.ui.dialog.clear()
+  }
+
+  // Show first, THEN set — verified order (see header comment): set() applies
+  // to the active dialog; before show() it is silently ignored.
+  ctx.ui.dialog.show(
+    () => <DialogHost state={state()} refreshing={refreshing()} onRefresh={() => void load(true)} />,
+    reset,
+  )
+  ctx.ui.dialog.set({ size: fittedDialogSize(ctx), centered: true })
+  void load(false)
 }
 
 /**
- * Prepare data for `sessionID` and open the panel in full-screen presentation.
- * The contribution (PanelHost) renders once the host mounts it; if the panel
- * is already open for a different session, the same signals swap the content.
+ * In-dialog body: escape closes (custom dialogs have no guaranteed
+ * escape-to-close) and r refreshes. The layer lives on this component, so it
+ * is disposed automatically when the dialog closes (docs: layers created by a
+ * component die with it).
  */
-function openPanelFor(ctx: Context, sessionID: string): void {
-  panelSessionID = sessionID
-  void refreshPanel(ctx, sessionID)
-  const opened = ctx.ui.panel.open(PANEL_NAME, { presentation: "fullscreen" })
-  if (!opened) {
-    panelSessionID = undefined
-    ctx.ui.toast.show({ message: "Open a session first", variant: "warning" })
-  }
+function DialogHost(props: { state: ViewState; refreshing: boolean; onRefresh: () => void }) {
+  const ctx = usePluginTui()
+  ctx.keymap.layer(() => ({
+    mode: "global",
+    priority: 100,
+    commands: [
+      { id: "tokens-usage.close", bind: "escape", run: () => requestClose?.() },
+      { id: "tokens-usage.refresh", bind: "r", run: props.onRefresh },
+    ],
+    bindings: ["tokens-usage.close", "tokens-usage.refresh"],
+  }))
+  return <StatsView state={props.state} refreshing={props.refreshing} onRefresh={props.onRefresh} />
 }
 
-/** Load (or reload) stats for the panel's session into the shared signals. */
-async function refreshPanel(ctx: Context, sessionID: string): Promise<void> {
-  const generation = ++panelGeneration
-  if (panelState().status === "ready") {
-    setPanelRefreshing(true)
-  }
-  try {
-    ctx.data.session.message.invalidate(sessionID)
-    const snapshot = await loadSnapshot(ctx, sessionID)
-    if (generation !== panelGeneration) return // stale
-    setPanelState({ status: "ready", model: buildViewModel(snapshot) })
-  } catch (error) {
-    if (generation !== panelGeneration) return
-    setPanelState({
-      status: "error",
-      message: error instanceof Error ? error.message : String(error),
-    })
-  } finally {
-    if (generation === panelGeneration) setPanelRefreshing(false)
-  }
-}
-async function showSelector(ctx: Context): Promise<void> {
+/** Session picker for when no session is focused (home screen). */
+async function showSelector(ctx: Context): Promise<string | undefined> {
   const location = ctx.location ?? ctx.data.location.default()
   const directory = location.directory
   let sessions: SessionInfo[] = []
@@ -205,7 +189,7 @@ async function showSelector(ctx: Context): Promise<void> {
   }
   if (sessions.length === 0) {
     ctx.ui.toast.show({ message: "No sessions in this project", variant: "info" })
-    return
+    return undefined
   }
 
   const options = sessions.map((s) => {
@@ -220,10 +204,10 @@ async function showSelector(ctx: Context): Promise<void> {
     }
   })
 
-  // The host's dialog select() resets size/centered internally, so set the
-  // presentation AFTER opening (set applies to the active dialog).
-  ctx.ui.dialog.set({ size: "xlarge", centered: true })
-  const selected = await ctx.ui.dialog.select({
+  // Promise-based select at the host default size (fits any terminal).
+  // dialog.set() before select() was never observed to apply (see
+  // docs/discrepancies_verification.md), so no size is requested here.
+  return await ctx.ui.dialog.select({
     title: "Token usage — select a session",
     options,
     search: (query, opts) => {
@@ -232,10 +216,4 @@ async function showSelector(ctx: Context): Promise<void> {
       return opts.filter((o) => o.title.toLowerCase().includes(q))
     },
   })
-
-  if (!selected) return
-  // Panels open only inside a session; from the home screen, navigate to the
-  // chosen session first, then open the panel.
-  ctx.ui.router.navigate({ type: "session", sessionID: selected })
-  openPanelFor(ctx, selected)
 }

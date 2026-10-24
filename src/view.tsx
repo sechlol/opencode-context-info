@@ -1,10 +1,11 @@
 /** @jsxImportSource @opentui/solid */
-// Presentational components for the stats panel. All data arrives as a
+// Presentational components for the stats dialog. All data arrives as a
 // ready-made StatsViewModel; this module owns no aggregation.
 //
-// The panel renders inside the host's session.panel container, which owns
-// sizing (flexGrow: 1; the full window in fullscreen presentation) and focus.
-// Colors come from semantic theme tokens via usePlugin() — no hardcoded hex.
+// The view renders inside the host's dialog content area, whose width comes
+// from the DialogSize preset (fixed columns — chosen to fit the terminal by
+// tui.tsx); the root box fills that width. Colors come from semantic theme
+// tokens via usePlugin() — no hardcoded hex.
 //
 // OpenTUI note: <text> accepts fg/attributes directly (TextOptions), but
 // <span> only honors style={{ fg, bg, attributes }} (see reconciler setProperty).
@@ -23,9 +24,7 @@ export type ViewState =
 export interface StatsViewProps {
   state: ViewState
   refreshing: boolean
-  /** Provided by the panel host (panel.close). */
-  onClose: () => void
-  /** Called for the `r` refresh binding (panel-scoped keymap layer). */
+  /** Called for the `r` refresh binding (dialog-scoped keymap layer). */
   onRefresh: () => void
 }
 
@@ -282,9 +281,9 @@ function Empty() {
 export function StatsView(props: StatsViewProps) {
   const tones = useTones()
   const model = () => (props.state.status === "ready" ? props.state.model : props.state.previous)
-  // The host's session.panel container owns sizing (flexGrow: 1 → the full
-  // window in fullscreen presentation). We paint the background and let
-  // content flow; a scrollbox keeps long lists navigable in any height.
+  // The dialog's content area has a definite width (the chosen preset) and
+  // auto height; the root box fills the width and paints the background, and
+  // content flows. A fixed per-column layout keeps lines inside the preset.
   const tonesBg = tones.bg
   return (
     <ErrorBoundary
@@ -295,7 +294,7 @@ export function StatsView(props: StatsViewProps) {
         </box>
       )}
     >
-      <box flexDirection="column" flexGrow={1} backgroundColor={tonesBg} paddingLeft={2} paddingTop={1} gap={1}>
+      <box flexDirection="column" width="100%" flexGrow={1} backgroundColor={tonesBg} paddingLeft={2} paddingTop={1} gap={1}>
         <Show when={props.state.status === "loading" && !model()}>
           <text fg={tones.dim}>Loading token usage…</text>
         </Show>
