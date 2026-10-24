@@ -23,7 +23,7 @@ Add the package to the `plugins` array in `~/.config/opencode/opencode.json`:
 }
 ```
 
-Save the file — OpenCode installs and loads the plugin. To pin a version, use `"opencode-tokens-usage@1.0.1"`.
+Save the file — OpenCode installs and loads the plugin. To pin a version, use `"opencode-tokens-usage@1.0.2"`.
 
 ### Manual (local checkout)
 

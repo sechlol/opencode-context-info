@@ -1,0 +1,18 @@
+name: Release Drafter
+
+# Keeps a draft GitHub Release up to date as pull requests merge into main.
+# Nothing is published to npm from this workflow. Publishing the draft release
+# (which creates the tag) is what triggers .github/workflows/publish.yml.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  update-release-draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: release-drafter/release-drafter@v7

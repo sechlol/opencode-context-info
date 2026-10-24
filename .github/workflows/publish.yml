@@ -1,28 +1,42 @@
 name: Publish
 
-# Publishes to npm when a version tag (e.g. v0.1.0) is pushed.
-# Requires an NPM_TOKEN repository secret with publish rights, or an npm
-# trusted publisher configured for this repository and workflow.
+# Stages a release when a draft GitHub Release is published.
+# Publishing the release (not pushing a tag) is the manual release action.
+# Uses npm Trusted Publishing (OIDC) with staged publishing, so no NPM_TOKEN
+# secret is required. A maintainer must approve the staged package with 2FA
+# before it goes live. Configure the trusted publisher at:
+# https://www.npmjs.com/package/opencode-tokens-usage/access
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
 
 permissions:
   contents: read
-  id-token: write # npm provenance
+  id-token: write # npm OIDC + provenance
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 26
-          registry-url: https://registry.npmjs.org
+          # No registry-url/.npmrc auth entry: npm must fall through to OIDC.
+          package-manager-cache: false # never cache dependencies in a release build
+      - name: Verify release tag matches package.json
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "$version" != "$package_version" ]]; then
+            echo "::error::Release tag $RELEASE_TAG does not match package.json version $package_version"
+            exit 1
+          fi
       - run: npm install
       - run: npm run check
       # `prepack` re-runs the checks before the tarball is built.
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Provenance is generated automatically by trusted publishing.
+      # This only stages the release; approve it separately with 2FA.
+      - run: npm stage publish --access public
