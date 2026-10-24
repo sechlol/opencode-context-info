@@ -2,8 +2,8 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { normalizeMessages } from "../src/data.ts"
 import type { LoadContext } from "../src/data.ts"
-import { loadSnapshot } from "../src/data.ts"
-import type { SessionMessageInfo } from "@opencode/client"
+import { listRootSessions, loadSnapshot } from "../src/data.ts"
+import type { SessionInfo, SessionMessageInfo } from "@opencode/client"
 
 const assistantMsg = (over: Record<string, unknown> = {}): SessionMessageInfo =>
   ({
@@ -159,13 +159,19 @@ function makeCtx(over: {
                 steps: 40,
                 tokens: { input: 1, output: 1, reasoning: 1, cache: { read: 1, write: 1 } },
                 cost: 1.02,
+                tools: { mode: "none" },
+                activeDays: 1,
+                streak: 1,
+                activity: [],
+                models: [],
               }),
-        list: () => Promise.resolve({ sessions: [] }),
+        // SessionsResponse: { data: SessionInfo[], cursor }
+        list: () => Promise.resolve({ data: [], cursor: {} }),
       },
       location: {
         get: over.locationFails
           ? () => Promise.reject(new Error("no location"))
-          : () => Promise.resolve({ project: { id: "proj_x", directory: "/d", canonical: "/d" } }),
+          : () => Promise.resolve({ directory: "/d", project: { id: "proj_x", directory: "/d", canonical: "/d" } }),
       },
     },
     data: {
@@ -183,7 +189,13 @@ function makeCtx(over: {
           invalidate: () => undefined,
         },
       },
-      location: { default: () => ({ directory: "/work/dir" }) },
+      location: {
+        default: () => ({ directory: "/work/dir" }),
+        model: { list: () => [] },
+      },
+    },
+    ui: {
+      model: { current: () => undefined },
     },
   }
 }
@@ -228,4 +240,54 @@ test("loadSnapshot: message sync failure degrades to warning", async () => {
   ctx.data.session.message.sync = () => Promise.reject(new Error("offline"))
   const snap = await loadSnapshot(ctx, "s1")
   assert.ok(snap.warnings.some((w) => w.includes("message sync failed")))
+})
+
+test("listRootSessions: returns the response data array", async () => {
+  const ctx = makeCtx()
+  const listed = [{ id: "s2" }, { id: "s1" }] as never as SessionInfo[]
+  ctx.client.session.list = () => Promise.resolve({ data: listed, cursor: {} })
+  const out = await listRootSessions(ctx, "/work/dir", 5)
+  assert.equal(out.length, 2)
+  assert.equal(out[0]!.id, "s2")
+})
+
+test("listRootSessions: falls back to root sessions from the cache when the server fails", async () => {
+  const ctx = makeCtx()
+  ctx.client.session.list = () => Promise.reject(new Error("offline"))
+  ctx.data.session.list = () =>
+    [
+      { id: "root-old", time: { created: 1, updated: 3 } },
+      { id: "root-new", time: { created: 1, updated: 9 } },
+      { id: "child", parentID: "root-new", time: { created: 1, updated: 99 } },
+    ] as never as SessionInfo[]
+  const out = await listRootSessions(ctx, "/work/dir")
+  assert.deepEqual(
+    out.map((s) => s.id),
+    ["root-new", "root-old"], // newest first, children excluded
+  )
+})
+
+test("loadSnapshot: context limit comes from the step's model in the location registry", async () => {
+  const ctx = makeCtx()
+  ctx.data.location.model.list = () =>
+    [
+      { providerID: "openrouter", id: "glm-flash", modelID: "glm-flash", limit: { context: 200_000, output: 8_000 } },
+    ] as never
+  const snap = await loadSnapshot(ctx, "s1")
+  assert.equal(snap.contextLimit, 200_000)
+  assert.equal(snap.contextUsed, 100 + 200 + 30)
+})
+
+test("loadSnapshot: falls back to the prompt's selected model for the context limit", async () => {
+  const ctx = makeCtx()
+  ctx.data.location.model.list = () =>
+    [{ providerID: "other", id: "big", modelID: "big", limit: { context: 1_000_000, output: 8_000 } }] as never
+  ctx.ui.model.current = () => ({ providerID: "other", modelID: "big" })
+  const snap = await loadSnapshot(ctx, "s1")
+  assert.equal(snap.contextLimit, 1_000_000)
+})
+
+test("loadSnapshot: unknown model hides the context row instead of guessing", async () => {
+  const snap = await loadSnapshot(makeCtx(), "s1")
+  assert.equal(snap.contextLimit, undefined)
 })

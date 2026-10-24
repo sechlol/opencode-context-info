@@ -1,65 +1,38 @@
 // Async I/O: loads a SessionSnapshot from the opencode client + cached data.
 // This is the ONLY module that knows OpenCode schema details; everything
 // downstream consumes the view-model types from types.ts.
+//
+// LoadContext is Pick-ed from the real TUI plugin Context shipped with
+// @opencode/plugin (`@opencode/plugin/tui/context`), so every member signature
+// is the installed one — no hand-rolled schema guesses. The full Context
+// passed to `setup(ctx)` satisfies it structurally, so call sites need no
+// casts, while tests can still mock just the members they exercise.
 
+import type { Context } from "@opencode/plugin/tui/context"
 import type { SessionMessageInfo, SessionInfo, TokenUsageInfo } from "@opencode/client"
 import type { UsageRecord, SessionSnapshot, Usage } from "./types.ts"
+import { latestCompletedStep, promptTokens } from "./stats.ts"
 
-/** Minimal structural slice of the TUI plugin context we depend on. */
-export interface LoadContext {
+export type LoadContext = {
   client: {
-    session: {
-      stats(input?: {
-        project?: string
-        tools?: "none" | "summary" | "detail"
-      }): Promise<{
-        range: { from: number; to: number }
-        sessions: number
-        subagents: number
-        prompts: number
-        steps: number
-        tokens: TokenUsageInfo
-        cost: number
-      }>
-      list(input?: {
-        limit?: number
-        order?: "asc" | "desc"
-        parentID?: string | null
-        archived?: boolean
-        directory?: string
-        project?: string
-        search?: string
-      }): Promise<{ sessions?: SessionInfo[] } & Record<string, unknown>>
-      context?(input: { sessionID: string }): Promise<SessionMessageInfo[]>
-    }
-    location: {
-      get(input?: { location?: { directory?: string } }): Promise<{
-        project: { id: string; directory: string; canonical: string }
-      }>
-    }
+    session: Pick<Context["client"]["session"], "list" | "stats">
+    location: Pick<Context["client"]["location"], "get">
   }
   data: {
-    session: {
-      list(): SessionInfo[]
-      get(sessionID: string): SessionInfo | undefined
-      root(sessionID: string): string
-      family(sessionID: string): string[]
-      cost(sessionID: string): number
-      status(sessionID: string): "idle" | "running"
-      sync(sessionID: string): Promise<void>
-      message: {
-        list(sessionID: string): SessionMessageInfo[]
-        sync(sessionID: string): Promise<void>
-        invalidate(sessionID: string): void
-      }
+    session: Pick<Context["data"]["session"], "list" | "get" | "root" | "family" | "cost" | "status" | "sync"> & {
+      message: Pick<Context["data"]["session"]["message"], "list" | "sync" | "invalidate">
     }
-    location: {
-      default(): { directory: string }
+    location: Pick<Context["data"]["location"], "default"> & {
+      model: Pick<Context["data"]["location"]["model"], "list">
     }
+  }
+  ui: {
+    model: Pick<Context["ui"]["model"], "current">
   }
 }
 
-function toUsage(t: TokenUsageInfo | undefined): Usage | undefined {
+/** Convert the client's TokenUsageInfo into the internal Usage shape. */
+export function toUsage(t: TokenUsageInfo | undefined): Usage | undefined {
   if (!t) return undefined
   return {
     input: num(t.input),
@@ -75,20 +48,6 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0
 }
 
-function isRecord(m: SessionMessageInfo): m is SessionMessageInfo & { type: "assistant" } {
-  return (m as { type?: string }).type === "assistant"
-}
-
-function isCompaction(m: SessionMessageInfo): boolean {
-  return (m as { type?: string }).type === "compaction"
-}
-
-function countToolCalls(m: SessionMessageInfo): number {
-  const content = (m as { content?: unknown }).content
-  if (!Array.isArray(content)) return 0
-  return content.filter((part) => (part as { type?: string })?.type === "tool").length
-}
-
 /** Normalize messages into UsageRecords; unknown shapes are skipped and counted. */
 export function normalizeMessages(messages: readonly SessionMessageInfo[]): {
   records: UsageRecord[]
@@ -98,47 +57,47 @@ export function normalizeMessages(messages: readonly SessionMessageInfo[]): {
   let skipped = 0
   for (const m of messages) {
     try {
-      if (isRecord(m)) {
-        const time = (m as { time?: { created?: number } }).time
-        const model = (m as { model?: { id?: string; providerID?: string; variant?: string } }).model
-        const usage = toUsage((m as { tokens?: TokenUsageInfo }).tokens)
-        const costRaw = (m as { cost?: unknown }).cost
-        const cost = num(costRaw)
-        const finish = (m as { finish?: unknown }).finish
+      // SessionMessageInfo is a discriminated union on `type` — narrowing
+      // gives fully typed fields (no structural guessing).
+      if (m.type === "assistant") {
+        const usage = toUsage(m.tokens)
         records.push({
-          at: num(time?.created),
-          completed: usage !== undefined && finish !== "error",
+          at: num(m.time.created),
+          completed: usage !== undefined && m.finish !== "error",
           kind: "assistant",
-          agent: (m as { agent?: string }).agent,
+          agent: m.agent,
           model: {
-            providerID: model?.providerID ?? "unknown",
-            id: model?.id ?? "unknown",
-            variant: model?.variant,
+            providerID: m.model.providerID,
+            id: m.model.id,
+            variant: m.model.variant,
           },
           usage,
-          cost: usage !== undefined ? cost : 0,
-          toolCalls: countToolCalls(m),
+          cost: usage !== undefined ? num(m.cost) : 0,
+          toolCalls: m.content.filter((part) => part.type === "tool").length,
         })
         continue
       }
-      if (isCompaction(m)) {
-        const status = (m as { status?: string }).status
-        if (status !== "completed" && status !== "failed") continue
-        const usage = toUsage((m as { tokens?: TokenUsageInfo }).tokens)
-        const cost = num((m as { cost?: unknown }).cost)
+      if (m.type === "compaction") {
+        // "running" compactions carry no usage yet and are not steps.
+        if (m.status !== "completed" && m.status !== "failed") continue
+        const usage = toUsage(m.tokens)
         records.push({
-          at: num((m as { time?: { created?: number } }).time?.created),
-          completed: usage !== undefined && status !== "failed",
+          at: num(m.time.created),
+          completed: usage !== undefined && m.status !== "failed",
           kind: "compaction",
-          model: { providerID: "unknown", id: "compaction" },
+          model:
+            "model" in m && m.model
+              ? { providerID: m.model.providerID, id: m.model.id, variant: m.model.variant }
+              : { providerID: "unknown", id: "compaction" },
           usage,
-          cost: usage !== undefined ? cost : 0,
+          cost: usage !== undefined ? num(m.cost) : 0,
           toolCalls: 0,
         })
         continue
       }
       skipped++
     } catch {
+      // Defensive: a degraded message must not take the whole panel down.
       skipped++
     }
   }
@@ -158,24 +117,19 @@ function sessionUsage(session: SessionInfo | undefined): Usage | undefined {
   }
 }
 
-/** Context-window estimate: prompt side of the newest assistant step, if any. */
-function contextUsedFromRecords(records: UsageRecord[]): number | undefined {
-  const last = [...records]
-    .filter((r) => r.kind === "assistant" && r.completed && r.usage)
-    .sort((a, b) => b.at - a.at)[0]
-  if (!last?.usage) return undefined
-  return last.usage.input + last.usage.cacheRead + last.usage.cacheWrite
-}
-
+/** Directory → project id cache for the rare degraded-session fallback. */
 const projectIDCache = new Map<string, string>()
 
+/**
+ * Project id for a session: SessionInfo carries it directly (typed, no cast),
+ * with a location lookup as the only fallback for degraded session info.
+ */
 async function resolveProjectID(
   ctx: LoadContext,
   directory: string,
   session: SessionInfo | undefined,
 ): Promise<string | undefined> {
-  const fromSession = (session as { projectID?: string } | undefined)?.projectID
-  if (fromSession) return fromSession
+  if (session?.projectID) return session.projectID
   const cached = projectIDCache.get(directory)
   if (cached) return cached
   try {
@@ -301,8 +255,9 @@ export async function loadSnapshot(
     }
   }
 
-  const contextUsed = contextUsedFromRecords(records)
-  const contextLimit = contextLimitLoader?.()
+  const latest = latestCompletedStep(records)
+  const contextUsed = latest?.usage ? promptTokens(latest.usage) : undefined
+  const contextLimit = resolveContextLimit(ctx, latest?.model)
   const sessionTokens = sessionUsage(session)
   const costKnown = session !== undefined && (session.cost !== undefined || reportedCost !== undefined)
 
@@ -331,14 +286,27 @@ function safeRoot(ctx: LoadContext, sessionID: string): string {
 }
 
 /**
- * The model context limit comes from the host's model registry, which lives in
- * the TUI plugin context rather than the LoadContext slice. `tui.tsx` injects
- * a loader here during setup.
+ * Context-window limit for the model that produced the newest step, resolved
+ * through the documented location model registry (`data.location.model.list`),
+ * with the prompt's selected model (`ui.model.current`) as fallback. Unknown
+ * model → undefined (the context row is hidden rather than guessed).
  */
-let contextLimitLoader: (() => number | undefined) | undefined
-
-export function setContextLimitLoader(loader: () => number | undefined): void {
-  contextLimitLoader = loader
+function resolveContextLimit(
+  ctx: LoadContext,
+  stepModel?: { providerID: string; id: string },
+): number | undefined {
+  try {
+    const models = ctx.data.location.model.list(ctx.data.location.default()) ?? []
+    const matches = (m: { providerID: string; id: string; modelID: string }, ref: { providerID: string; id: string }) =>
+      m.providerID === ref.providerID && (m.id === ref.id || m.modelID === ref.id)
+    const selected = ctx.ui.model.current()
+    const hit =
+      (stepModel && models.find((m) => matches(m, stepModel))) ||
+      (selected && models.find((m) => matches(m, { providerID: selected.providerID, id: selected.modelID })))
+    return hit?.limit.context
+  } catch {
+    return undefined
+  }
 }
 
 /** Fetch root sessions for the selector, server-side, newest first. */
@@ -348,6 +316,7 @@ export async function listRootSessions(
   limit = 100,
 ): Promise<SessionInfo[]> {
   try {
+    // The generated client returns SessionsResponse: { data: SessionInfo[], cursor }.
     const res = await ctx.client.session.list({
       parentID: null,
       archived: false,
@@ -355,13 +324,12 @@ export async function listRootSessions(
       order: "desc",
       limit,
     })
-    const sessions = (res as { sessions?: SessionInfo[]; data?: { sessions?: SessionInfo[] } })
-    return sessions.sessions ?? (sessions as unknown as { data?: { sessions?: SessionInfo[] } }).data?.sessions ?? []
+    return res.data
   } catch {
     // fall back to the cache; filter to roots client-side
     return ctx.data.session
       .list()
-      .filter((s) => !(s as { parentID?: string }).parentID)
+      .filter((s) => !s.parentID)
       .sort((a, b) => num(b.time?.updated) - num(a.time?.updated))
   }
 }

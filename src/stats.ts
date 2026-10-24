@@ -144,12 +144,20 @@ function toStepRows(records: UsageRecord[]): StepRow[] {
   return rows.sort((a, b) => b.at - a.at)
 }
 
+/** Prompt side of a step: input + cache read + cache write. */
+export function promptTokens(u: Usage): number {
+  return u.input + u.cacheRead + u.cacheWrite
+}
+
+/** Newest completed assistant step with usage (records are time-ordered asc). */
+export function latestCompletedStep(records: readonly UsageRecord[]): UsageRecord | undefined {
+  return [...records]
+    .filter((r) => r.kind === "assistant" && r.completed && r.usage)
+    .sort((a, b) => b.at - a.at)[0]
+}
+
 /** Current-context estimate: the prompt side of the most recent completed step. */
 export function estimateContextUsed(records: UsageRecord[]): number | undefined {
-  const completed = records
-    .filter((r) => r.completed && r.usage)
-    .sort((a, b) => b.at - a.at)
-  const last = completed[0]
-  if (!last?.usage) return undefined
-  return last.usage.input + last.usage.cacheRead + last.usage.cacheWrite
+  const last = latestCompletedStep(records)
+  return last?.usage ? promptTokens(last.usage) : undefined
 }
