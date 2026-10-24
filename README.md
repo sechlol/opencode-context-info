@@ -1,124 +1,81 @@
-# opencode-context-info
+# Opencode Token Usage Info Plugin
 
-Token usage statistics for [OpenCode](https://opencode.ai) v2 sessions — `/tokens_usage`,
-fully script-based, **no LLM in the loop**.
+<p align="center">
+  <img src="docs/info.png" alt="Token usage dialog: cost, token categories and context window" width="600" />
+</p>
 
-## What it shows
-
-Run `/tokens_usage` (alias `/usage`) or pick **Show token usage** in the command palette:
-
-- **Inside a session** → a dialog with that session's stats:
-  - Session cost (the headline figure) and the sum of reported token categories
-  - Component breakdown: input, output, reasoning, cache read, cache write (rendered as one
-    stacked-composition view with per-component bars)
-  - **Context window** occupancy — the last completed step's prompt size vs the model's context
-    limit (an estimate; answers "how full is my context window?")
-  - Per-model breakdown (steps, tokens, cost) and recent steps (time, model, tokens, cost, tools)
-  - Subagent usage, reported per child session
-  - Project totals from opencode's stats endpoint, with the time range labeled
-- **On the main screen** → a session selector (newest first, searchable) — pick any session to
-  visualize.
-
-Keys inside the dialog: `esc` close · `r` refresh.
-
-Numbers come from the usage telemetry opencode already records per message and per session
-(what the provider billed) — nothing is re-tokenized, no prompts are sent anywhere, and no
-LLM is involved.
-
-### What the numbers mean
-
-- **COST** is the session's reported cost — the comparable headline.
-- Token categories (input / output / reasoning / cache read / cache write) are **not universally
-  disjoint** across providers: some providers include reasoning in output, or cached tokens in
-  input. The dialog therefore does *not* present a grand "TOTAL"; it shows the components plus a
-  "Σ reported" sum with that caveat.
-- Session totals are read from opencode's own session record; per-step rows are attribution and
-  reconcile against the total via an "other/auxiliary" row when usage isn't explained by steps.
-- Subagent tokens are reported per child session and are **not added** into the session total.
-- Project totals come from an experimental endpoint; if it's unavailable the rest of the dialog
-  still works.
+<p align="center">
+  Adds a <code>/tokens_usage</code> command to OpenCode that shows what a session costs and where its tokens went:
+  cost, a per-category token breakdown, and how full the context window is. Script-based only — no LLM in the loop,
+  no message content leaves your machine.
+</p>
 
 ## Install
 
-Requirements: OpenCode **v2.1.4+**. No tokenizer dependencies, no LLM usage.
+Requires **OpenCode v2.1.4+** (Node 22+ only for source installs).
 
-Close OpenCode first, then:
+### From npm
 
-```bash
-git clone <this-repo-url> && cd opencode-context-info
-./install.sh            # deploys plugin shims into ~/.config/opencode/plugins/
+Add the package to the `plugins` array in `~/.config/opencode/opencode.json`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-tokens-usage"]
+}
 ```
 
-`install.sh` flags: `--dry-run`, `--target DIR`, `--uninstall`, `--help`.
+Save the file — OpenCode installs and loads the plugin. To pin a version, use `"opencode-tokens-usage@0.1.0"`.
 
-> **Why shims?** Verified on v2.1.4: plugins auto-load from *directories* under
-> `~/.config/opencode/plugins/` (the directory's `index.ts` is the server entry;
-> a `tui.tsx` at the directory root marks the TUI feature). Registering local
-> paths in `cli.json` or `opencode.json` `plugins` arrays was tested and is
-> **not applied** by v2.1.4, so the installer writes two one-line shim files
-> that re-export this repo's `src/index.ts` and `src/tui.tsx` instead.
+### Manual (local checkout)
 
-The shims reference the repo by absolute path — if you move the repo, re-run
-`./install.sh`. Publishing the package to npm and registering it by name is the
-stable long-term option.
+```bash
+git clone https://github.com/sechlol/opencode-context-info.git
+cd opencode-context-info
+npm install
+./install.sh
+```
 
-### Do not double-register
+`install.sh` registers the checkout's absolute path, so re-run it if you move the repo. Flags: `--dry-run`,
+`--config FILE`, `--uninstall`, `--help`.
 
-Do not also add this repo to `cli.json` or `opencode.json` `plugins` — if config
-entries gain local-path support in a future version, that would double-load the
-TUI entry (duplicate `/tokens_usage` commands). The installer warns if it finds
-stale config references.
+Register the plugin **once** — either by package name or by path, not both, and not in `cli.json`.
 
-## Uninstall
+### Uninstall
+
+Remove the `opencode-tokens-usage` entry from `plugins` in `~/.config/opencode/opencode.json`. From a checkout you can
+also run:
 
 ```bash
 ./install.sh --uninstall
 ```
 
-If you registered the repo in `cli.json`/`opencode.json` during earlier attempts,
-remove those entries too.
+## Usage
+
+Run `/tokens_usage` (alias `/usage`), or pick **Show token usage** from the command palette:
+
+- **Inside a session** — a dialog with that session's stats:
+  - cost and a breakdown of input, output, reasoning, cache read and cache write tokens
+  - context-window occupancy (last completed step's prompt size vs the model's limit, an estimate)
+  - per-model totals and recent steps (time, model, tokens, cost, tools)
+  - subagent usage, listed per child session
+  - project totals, with the time range
+- **On the home screen** — a searchable session picker; choose any session to inspect it.
+
+Keys: `esc` closes the dialog, `r` refreshes it.
+
+Cost is the comparable headline. Token categories can overlap by provider, so the dialog shows the components and a
+"Σ reported" sum instead of a grand total. Subagent tokens are listed separately and are not added to the session total.
 
 ## Verify
 
-- Start OpenCode, run `/tokens_usage` in a session and from the home screen.
-- Note: `opencode plugin list` lists **server** plugins only — it is not evidence about CLI
-  plugins. If the command doesn't appear, check the CLI log at
-  `~/.local/share/opencode/log/opencode.log`, try `/reload`, and as a last resort restart the
-  background service (`opencode service status`) or boot once with `opencode` after closing all
-  instances to clear stale plugin-load state.
-
-## Uninstall
-
-```bash
-./install.sh --uninstall
-```
-
-If you had registered it manually in `cli.json` at some point, remove that entry too
-(the installer also offers `--target ~/.config/opencode/cli.json --uninstall`).
-
-## Development
-
-```bash
-npm install
-npm run check   # typecheck + tests
-```
-
-Layout: `src/tui.tsx` (command, routing, dialog) · `src/data.ts` (OpenCode I/O and
-normalization) · `src/stats.ts` (pure aggregation) · `src/format.ts` (pure formatting) ·
-`src/view.tsx` (OpenTUI/Solid rendering) · `test/` (fixtures + unit tests for the pure layers).
+Start OpenCode and run `/tokens_usage` in a session and from the home screen. If the command is missing, run `/reload`
+and check `~/.local/share/opencode/log/opencode.log`. Note that `opencode plugin list` only covers server plugins, so it
+says nothing about this one.
 
 ## Known limits
 
-- The session selector lists up to 100 root sessions of the current project, searched locally.
+- The session picker lists up to 100 root sessions of the current project and searches them locally.
 - Context-window occupancy is an estimate based on the last completed step.
-- Project totals depend on an experimental endpoint and need a reachable project ID.
-- Cost reflects provider-reported values; for free models it shows `$0`, for unknown values `—`.
-
-## Compatibility
-
-- Tested against OpenCode 2.1.4, `@opencode/plugin` 2.1.4, `@opencode/client` 2.1.4.
-- The plan and review history live in `docs/`; legacy v1 exploration (not imported) in `reference/`.
-
-## Privacy
-
-Everything runs locally against your OpenCode server. No message content leaves your machine.
+- Project totals come from an experimental endpoint and need a reachable project ID.
+- Cost is provider-reported: free models show `$0`, unknown values show `—`.
