@@ -5,9 +5,10 @@
 > **What this documents:** the approach that reached a *working* `/tokens_usage` slash command —
 > a fully script-based TUI dialog with session token statistics, zero LLM involvement —
 > including everything that failed along the way and why.
+> **Claims below are verified against OpenCode v2.1.4.** The full evidence and verdicts live in
+> `docs/discrepancies_verification.md` (V1–V10), which is the source of truth; this guide
+> cross-references those V-numbers instead of restating the proofs.
 >
-> Companion documents: `docs/tokens-usage-plugin.md` (the plan), `docs/ds_review.md` and
-> `docs/mimo_review.md` (independent reviews that caught real API errors before build).
 > Working code: `src/`, `install.sh`, `test/`.
 
 ---
@@ -39,15 +40,22 @@ package.json     "type": "module"
                                 solid-js >=1.9.0, @opencode/theme 2.1.4
 src/index.ts     server entry (no-op)
 src/tui.tsx      CLI plugin: Plugin.define({ id, setup(ctx) })
-tui.tsx          ROOT-LEVEL shim re-exporting src/tui.tsx  ← load detection reads this
+index.ts         ROOT-LEVEL shim re-exporting src/index.ts  ← required: a config-path
+                 plugin directory must contain an `index` (or `server`) module at its
+                 root, or the whole directory is silently skipped (V1b)
+tui.tsx          ROOT-LEVEL shim re-exporting src/tui.tsx   ← the TUI entrypoint the
+                 CLI-side feature detection picks up for a directory entry
 ```
 
 - Import from `@opencode/plugin/tui`, **not** `@opencode-ai/plugin` (the v1 package — its
   npm `@opencode-ai/plugin@1.x` exports only `tool` and the old `api`-style TUI contract).
-- Peer ranges matter: the *official docs example* says `@opentui/* >=0.6.6`, but
-  `@opencode/plugin@2.1.4` itself declares `>=0.6.8`. Use the latter or npm ERESOLVEs.
-- For a CLI-only plugin installed from a local path, **you don't need npm publish** — but you
-  *do* need the discovery mechanism described in §3.
+- Peer ranges matter: the *official docs example* says `@opentui/* >=0.6.6` and is **wrong** —
+  `@opencode/plugin@2.1.4` itself declares `>=0.6.8` (plus an `@opencode/theme` peer the docs
+  example omits), and npm hard-fails with ERESOLVE on any `@opentui/*` in `[0.6.6, 0.6.8)` (V4).
+  Use `>=0.6.8` + `@opencode/theme 2.1.4` — the ranges the plugin package declares.
+- For a CLI-only plugin installed from a local path you don't need npm publish — **multiple
+  mechanisms work and are documented**: config-file path registration, `cli.json` paths for
+  CLI-only plugins, and directory auto-discovery. All of them are in §3.
 
 ### 1.3 The v2 TUI API that actually works (all verified live)
 
@@ -76,20 +84,38 @@ export default Plugin.define({
     const picked = await ctx.ui.dialog.select({ title, options, search })
 
     // 4) Custom dialog — show() takes a THUNK, not JSX
-    ctx.ui.dialog.set({ size: "xlarge" })            // applies to the ACTIVE dialog; call right before show
     ctx.ui.dialog.show(() => <MyView .../>, onClose)  // onClose = dispose your state
-    ctx.ui.dialog.clear()                            // close it yourself (e.g. on escape)
+    ctx.ui.dialog.set({ size: "xlarge" })   // MUST be called immediately AFTER show()
+                                             // returns — set-before-show is a silent
+                                             // no-op on 2.1.4 (the docs show the wrong
+                                             // order; V9)
+    ctx.ui.dialog.clear()                   // close it yourself (e.g. on escape)
 
     // 5) Cached reactive data (no raw client calls needed for common reads)
     ctx.data.session.get(id) / .list() / .family(id) / .root(id)
     ctx.data.session.status(id) / .cost(id) / .sync(id) / .invalidate(id)
     ctx.data.session.message.list(id) / .sync(id) / .invalidate(id)
+
+    // 6) Documented event API — returns an unsubscribe function:
+    const stop = ctx.data.on("session.execution.succeeded", handler)
+    //    we use it (debounced) for auto-refresh while the dialog is open, and
+    //    call stop() from the cleanup function returned by setup().
+
+    // 7) Inside dialog/slot/route components, get at ctx with:
+    //    import { usePlugin } from "@opencode/plugin/tui"   →  const ctx = usePlugin()
   },
 })
 ```
 
+Dialog geometry, pinned by emulator-measured pty transcripts (V9): size presets are **fixed
+column widths** — medium 60 / large 88 / xlarge 116 — chosen by fitting `ctx.renderer.width`,
+and `show()` dialogs are **horizontally centered by default**, even with no `set({centered})`.
+
 Data shapes worth pinning (from `@opencode/client@2.1.4` types):
 
+- `client.session.list(...)` returns `SessionsResponse = { data: SessionInfo[], cursor }` —
+  there is **no `sessions` key** at either level. Guessing `{ sessions }` (in code *and* in the
+  test mock) made the selector always return `[]` (V10).
 - `TokenUsageInfo = { input, output, reasoning, cache: { read, write } }` — on assistant
   messages **and on `SessionInfo`** (authoritative session totals).
 - `SessionMessageAssistant.tokens` and `.cost` are **optional** (in-progress / errored /
@@ -114,7 +140,9 @@ Data shapes worth pinning (from `@opencode/client@2.1.4` types):
   `<span fg>` is silently ignored (typecheck catches this only if you're lucky).
 - Custom JSX dialogs have **no guaranteed escape-to-close**. Bind it yourself:
   `ctx.keymap.layer(() => ({ mode: "global", priority: 100, commands: [{ id, bind: "escape", run: () => ctx.ui.dialog.clear() }] }))`
-  inside the dialog lifecycle, and dispose in `dialog.show`'s `onClose`.
+  inside the dialog lifecycle, and dispose in `dialog.show`'s `onClose`. A layer created inside
+  the dialog component itself is disposed automatically when the dialog closes (documented
+  lifecycle) — which is why we attach the in-dialog bindings there.
 - Keymap layers default to `mode: "base"`; while a dialog owns input that may not be the active
   mode. Use `mode: "global"` (+ `priority`) for in-dialog bindings.
 - Wrap your view in a Solid `ErrorBoundary` — an unhandled render exception in a TUI plugin can
@@ -148,14 +176,26 @@ Token-accounting lessons baked into `stats.ts`:
 ### 1.6 Process model and verification
 
 - The TUI is a **thin client over a long-running background service** (`opencode serve --service`).
-  The service boots once and **caches its config**. Editing `opencode.json` and restarting the
-  TUI is *not* enough for server-side config — the service must restart too. TUI-side plugin
-  registration happens in the TUI process (role=cli) during its plugin reconciliation.
-- `opencode plugin list` lists **server** plugins only. It is not evidence about CLI plugins.
+  TUI-side plugin registration happens in the TUI process (role=cli) during its plugin
+  reconciliation. Config changes in watched config directories **hot-reload automatically** —
+  verified live on the running service: a `plugins` entry added to `opencode.json` was picked
+  up and loaded with no restart whatsoever (V6). Restart the service only for unwatched local
+  dependencies or when you suspect a stale cache; `/reload` in the TUI is the first thing to
+  try, and a fresh process is the tiebreaker.
+- `opencode plugin list` shows server-loaded plugins **and** local config/discovery entries —
+  a `cli.json`-only entry appears with ID `-` — so it *is* evidence about local registration;
+  `plugin check` covers server and TUI-only package plugins (V5).
 - `opencode run --standalone` boots a *fresh* server that reads current config — the cleanest
-  way to test server-side plugin loading without touching the running service.
-- TUI-side verification ultimately requires the real TUI. Don't burn hours trying to drive it
-  from scripts; screen-scraping a pty is unreliable (input timing, 12KB scrollback caps).
+  way to test server-side plugin loading without touching the running service. Methodology
+  lesson from V1: plugins load at **location activation** (a session/request), not during idle
+  boot. An idle `serve` shows zero plugin lines, and `run` without a message exits immediately
+  with `Error: You must provide a message` — a boot-only trace showing "zero attempts" proves
+  nothing about whether an entry was wired up.
+- TUI-side verification: driving *input* from scripts stays unreliable — leave interaction
+  verification to the human (see Attempt 3). Static *rendering*, however, CAN be verified
+  reliably: a probe plugin can auto-open UI from `setup()` with no input at all, record the pty
+  transcript, and replay it through a terminal emulator (pyte) to measure rendered frames —
+  that is exactly how the `dialog.set()` behavior was pinned (V9).
 - **Never `pkill -f opencode`** — it matches the user's own running session. If you must spawn
   throwaway instances, make them self-terminate (`perl -e 'alarm N; exec @ARGV' …`, since macOS
   has no GNU `timeout`) and never kill by name.
@@ -164,38 +204,13 @@ Token-accounting lessons baked into `stats.ts`:
 
 ## 2. What we tried, and why it didn't work
 
-### Attempt 1 — `cli.json` with a local path (rev 1 plan)
-
-```jsonc
-// ~/.config/opencode/cli.json
-{ "plugins": ["/absolute/path/to/repo"] }
-```
-
-**Result: never loaded.** TUI debug logs showed the CLI plugin reconciliation running (13
-builtin `opencode.*` plugins set up) but our path was never discovered, never set up, no error
-logged. The `cli.json` schema does have a `plugins` array, and the docs say CLI-only packages
-are configured there — but on 2.1.4 a **local directory path** entry is inert.
-
-*Post-mortem:* the docs example only ever shows **package names** in `cli.json.plugins`
-(`"opencode-acme-plugin"`). Local-path support there is undocumented/unverified, and in this
-build absent.
-
-### Attempt 2 — `opencode.json` `plugins` with a local path (rev 3 fix)
-
-```jsonc
-// ~/.config/opencode/opencode.json
-{ "$schema": "https://opencode.ai/config.json", "plugins": ["/absolute/path/to/repo"] }
-```
-
-**Result: also never loaded — and silently.** A trace-level log of a *fresh* standalone boot
-(one that provably read this same config file — the `mcp` section in it connected) contained
-**zero** attempts to resolve our path. The supervisor never received the entry at all, so it
-isn't a load failure; config-file local-path entries simply aren't wired up in 2.1.4.
-
-*Post-mortem:* the v2 docs' `plugins` examples show package names, npm specs, and `./relative`
-local paths. Whether relative paths work was not tested (our entry was absolute); a relative
-entry resolved against the *config directory* might behave differently. What *is* proven:
-config-file entries are the wrong mechanism for local development on 2.1.4.
+> **Retraction.** An earlier revision of this document claimed that local paths in `cli.json`
+> (Attempt 1) and `opencode.json` (Attempt 2) were inert on 2.1.4. Both conclusions were
+> **disproven**: all config-file local-path forms work — absolute, `file://`, and relative, in
+> both `opencode.json` and `cli.json` (V1/V2). The original claims were a methodology error —
+> boot-only traces that never reached location activation, and watching a config file other
+> than the one the running process actually read. The two attempt write-ups have been removed;
+> see V1/V2 for the evidence.
 
 ### Attempt 3 — driving the TUI from scripts to "verify" the command
 
@@ -204,96 +219,117 @@ config-file entries are the wrong mechanism for local development on 2.1.4.
 **Result: unreliable and harmful.** Enter delivery was flaky; the `script` scrollback capped at
 12KB so post-keystroke frames were cut off; and the cleanup (`pkill -f "^opencode$"`) killed the
 user's own running CLI twice. Abandoned in favor of: fresh standalone boots for *loading*
-verification, and the human user for *interaction* verification.
+verification, the human user for *interaction* verification — and, for static rendering only,
+the auto-open-from-`setup()` + emulator-replay technique described in §1.6 (V9), which needs no
+input driving at all.
 
 ---
 
-## 3. The fix that made it work (rev 4)
+## 3. Loading mechanisms that work (all verified)
 
-**Directory auto-discovery under `~/.config/opencode/plugins/`.** This is the mechanism the
-legacy community plugin already used successfully on this machine, and it's what the binary
-actually implements. Reading `PluginModule.load` in the binary (via `strings`) shows a directory
-target is inspected and yields a feature record `{ server, tui?, rpc? }`:
+### 1. Config-file registration (what `install.sh` does now)
 
-- `<dir>/index.ts` — the **server entry** (only this file is loaded as a server plugin; loose
-  support files in the directory are *not* separately loaded — that's a feature, see gotchas)
-- `<dir>/tui.tsx` — presence at the **directory root** marks the **TUI feature**, activating
-  the CLI plugin on the TUI side
-- (`rpc` analogous; not used here)
-
-Our sources live in `src/`, so the installer writes two one-line **shims** into the deployed
-directory:
-
-```ts
-// ~/.config/opencode/plugins/tokens-usage/index.ts
-export { default } from "/abs/path/to/repo/src/index.ts"
-
-// ~/.config/opencode/plugins/tokens-usage/tui.tsx
-export { default } from "/abs/path/to/repo/src/tui.tsx"
+```jsonc
+// ~/.config/opencode/opencode.json
+{ "plugins": ["/abs/path/to/repo"] }
 ```
 
-`install.sh` deploys these (with `--dry-run` / `--target` / `--uninstall`), warns about stale
-config-file registrations, and is idempotent. Verification that it works:
+The server loads the directory's `index` module (our root `index.ts` shim). The CLI then reads
+and sets up the directory's `tui.tsx` automatically via the server-reported plugin list, so
+**no `cli.json` entry is needed**. Verified end-to-end against a dedicated server + TUI:
 
 ```
-$ opencode --print-logs run … (fresh standalone boot)
-msg="loading plugin" id=/Users/loaf/.config/opencode/plugins/tokens-usage
-                     entrypoint=file:///…/tokens-usage/index.ts
+stage=read  target=<repo> entrypoint=<repo>/tui.tsx   role=cli
+stage=setup plugin=loaf.tokens-usage                  role=cli
 ```
 
-…with no load errors, and the slash command appearing in the TUI.
+Config changes hot-reload — no restart (V6); `/reload` in the TUI if the slash command doesn't
+appear yet.
 
-**Package-name alternative:** the same directory convention works if you copy the package into
-`plugins/`, or (untested here) you publish to npm and register by name in the config files —
-the docs' package-name examples are the *supported* path for distribution; local paths in
-config files are what's broken on 2.1.4.
+`install.sh`'s current behavior: it atomically merges the repo path into the `plugins` array of
+`opencode.json` (idempotent, refuses to touch a config that isn't valid JSON, preserves the
+file's mode), migrates the legacy generated-shim directory (removed only when its files carry
+the old installer's marker — foreign directories are left alone with a warning), and supports
+`--dry-run`, `--uninstall`, `--config FILE`, `--legacy-dir DIR`.
+
+### 2. Directory auto-discovery (documented — no longer a binary-only secret)
+
+The docs (Plugins → **Discover**, and `/cli/plugins`) now describe the convention explicitly:
+
+```
+~/.config/opencode/plugins/<name>/     entry: index.ts OR server.ts
+<project>/.opencode/plugins/<name>/   TUI marker: tui.ts OR tui.tsx
+```
+
+Both locations and both marker spellings were verified functionally (V3), including the
+`server.ts`-only variant (V1b). Two caveats the docs don't state: a directory with **neither**
+`index` nor `server` is **silently skipped**, and `package.json` `exports` is **not consulted**
+for config-path directories (V1b) — hence the root shims in §1.2. The docs also say direct
+`.ts`/`.js` files in the plugins dir are loaded *as plugins*, so keep support files inside your
+plugin directory rather than loose next to it.
+
+### 3. `cli.json` local paths for CLI-only plugins (documented and verified)
+
+`/cli/plugins` shows `./…`, `/…` and `file://…` entries right in the example, and V2 verified
+them: `{"plugins": ["<abs dir>"]}` in `~/.config/opencode/cli.json` makes the CLI read and set
+up the directory's `tui.*` entry (`stage=read … role=cli`, marker written in the CLI process).
+Note `index.ts` is *not* read CLI-side — it's the server entry only. Not needed if you use
+mechanism 1, but genuinely useful for CLI-only plugins.
+
+### 4. Package-name registration (npm publish)
+
+Still the docs' distribution path for sharing: publish to npm, then register by package name in
+`opencode.json` / `cli.json`. Untested here.
 
 ---
 
 ## 4. Documentation errors that misled us
 
-1. **`cli.json` "Configure a CLI-only package in cli.json"** — true for *published package
-   names*, but the docs never say local paths don't work there on 2.1.4. We assumed path
-   entries were supported because the schema accepts strings. **Cost: a full attempt cycle.**
-2. **`opencode.json` `plugins` with `./plugins/local` style local paths** — the docs show this
-   form prominently. On 2.1.4, a *local directory path* entry is silently ignored (no load
-   attempt, no error). **Cost: a second attempt cycle, and a misleading "it works on the docs"
-   confidence.** (Relative-path forms may work; absolute paths provably don't.)
-3. **Peer dependency ranges** — the docs' `package.json` example says `@opentui/core >=0.6.6`,
-   but `@opencode/plugin@2.1.4` declares `>=0.6.8` and npm hard-fails resolution on the lower
-   pin. Use the version the plugin package itself declares.
-4. **`docs` vs reality for `dialog.show`** — the docs' prose is fine, but the plan's pseudocode
-   (`dialog.show(<StatsView/>)`) was wrong: the signature is
-   `show(render: () => JSX.Element, onClose?)`. Two reviews caught this pre-build. The lesson:
-   **verify every API against the installed type definitions** (`node_modules/@opencode/plugin/dist/tui/*.d.ts`
-   and `@opencode/client`'s `dist/promise/generated/types.d.ts`), not against docs or memory.
-5. **`ctx.location.project`** — the *server* plugin docs show `ctx.location.project.{id,canonical}`;
-   the TUI context's `location` is a bare `LocationRef`. Mixing the two contexts is easy and
-   typechecking catches it only if the types are actually installed and checked.
-6. **General docs gap:** nothing in the docs describes the *directory feature-detection*
-   convention (`index.ts` = server, `tui.tsx` = TUI). It's only discoverable from the binary or
-   from community plugins. This is the single most load-bearing fact for local TUI plugin
-   development, and it's undocumented.
+Only errors that survived independent verification — full evidence in
+`docs/discrepancies_verification.md`:
+
+1. **Peer dependency example.** The docs' `package.json` example says `@opentui/* >=0.6.6`, but
+   `@opencode/plugin@2.1.4` declares `>=0.6.8` (and the example omits the `@opencode/theme`
+   peer entirely). Installing any `@opentui/*` in `[0.6.6, 0.6.8)` hard-fails with ERESOLVE —
+   reproduced on npm 12.2.0 / Node 24 (V4). Use the ranges the plugin package itself declares.
+2. **`dialog.set` shown before `dialog.show`** in the "Dialogs and toasts" example. On 2.1.4
+   that ordering is a **silent no-op** — dialogs stay on the default 60-column preset. The
+   working order is `show(...)` → `set(...)` immediately after. The docs also don't say that
+   presets are fixed column widths (medium 60 / large 88 / xlarge 116) or that `show()`
+   dialogs are horizontally centered by default (V9).
+3. **Minor gaps.** The docs don't say that a config-path directory lacking **both** `index` and
+   `server` is silently skipped (nor that package `exports` aren't consulted for such
+   directories — V1b); and their examples show only `tui.ts` although `tui.tsx` works too
+   (both verified, V3).
 
 ---
 
 ## 5. Gotchas and best practices (collected)
 
 ### Loading & discovery
-- **Directory plugins load only their `index.ts`.** Loose `.ts`/`.mjs`/`.json` files sitting in
-  `~/.config/opencode/plugins/` get picked up *as plugins* and fail
+- **Directory plugins load only their entry module** (`index`/`server` server-side, `tui.*`
+  CLI-side). The docs say direct `.ts`/`.js` files in `~/.config/opencode/plugins/` are loaded
+  as plugins too (V3) — so loose support files sitting there get picked up and fail
   (`Plugin must export a default definition…`). Keep support files inside a directory whose
-  entry point is the plugin, or outside `plugins/` entirely.
-- **TUI feature = `tui.tsx` at the directory root.** Without it, the server plugin loads but
-  the slash command never appears in the TUI.
-- **The background service caches config.** After any config change: restart the *service*
-  (or use `--standalone` to verify with a fresh process), not just the TUI.
+  entry point is the plugin, or outside `plugins/` entirely. (`.mjs`/`.json` behavior was
+  observed but not separately verified; the docs only promise `.ts`/`.js`.)
+- **TUI feature = `tui.ts` OR `tui.tsx` at the directory root.** Both verified working; the
+  docs show `tui.ts`. Without one, the server plugin loads but the slash command never appears
+  in the TUI.
+- **Config changes hot-reload** — watched config directories reload automatically, verified on
+  the live service (a `plugins` entry added to `opencode.json` loaded with no restart, V6). No
+  service restart for config edits; restart only for unwatched local dependencies or stale-cache
+  confusion, and prefer `/reload` / a fresh process (below).
 - Plugin-load failures from a stale service can persist after you fix the files
   (`Cannot find package` etc.). `touch` the file to force a watcher reload; verify with a fresh
   process. Check `~/.local/share/opencode/log/opencode.log` timestamps before assuming a fix failed.
 - `/reload` is the first thing to try after changing plugin code; a full restart is the fallback.
 
 ### API & typing
+- **Verify every API against the installed type definitions** —
+  `node_modules/@opencode/plugin/dist/tui/*.d.ts` and `@opencode/client`'s generated types —
+  not against docs or memory. It caught the `dialog.show` thunk signature, the optional
+  `tokens`/`cost` fields, and (later) the real `session.list` response shape (V10).
 - Install `@opencode/plugin` and `@opencode/client` as real dependencies and **typecheck
   against them** (`tsc --noEmit`). It caught three real API errors in our plan before any code
   was written: `ctx.location.project` (doesn't exist on TUI), optional `tokens`/`cost`,
@@ -303,35 +339,40 @@ config files are what's broken on 2.1.4.
   how in-progress/errored steps appear in the UI vs totals.
 - `search` in `dialog.select` runs for **every query including the empty one** and must return
   the full option list in display order for `""`.
-- `dialog.set({ size })` applies to the *active* dialog — call it immediately before `show`.
+- `dialog.set({ size })` applies to the *active* dialog — call it immediately **after** `show()`
+  returns; before `show()` it is silently ignored on 2.1.4 (docs order is wrong, V9).
 - `SessionListInput` supports server-side filtering (`parentID: null`, `archived`, `directory`,
   `project`, `order`, `limit`) — prefer it over filtering the ~50-entry client cache when you
-  need a session list.
+  need a session list. The response is `{ data, cursor }` — read `res.data` (V10).
 - `family(sessionID)` may include the session itself and nested descendants; dedupe via
   `root(sessionID)` and exclude self, or you'll double-count subagent usage.
 
 ### TUI / OpenTUI
 - `<span>` props ≠ `<text>` props (see §1.4). When in doubt, read the reconciler:
   `node_modules/@opentui/solid/index.js` → `setProperty`.
-- `xlarge` dialogs overflow an 80×24 terminal. Check the renderer width and fall back to
-  `large`; put scrollable content in a `scrollbox`; always render the numeric value next to a
-  bar (never color/length alone).
-- Use semantic theme tokens where possible; if you must use hex (as we did for category colors),
+- Size presets are fixed columns (60 / 88 / 116) — pick the largest that fits
+  `ctx.renderer.width` (`>=120` → xlarge, `>=92` → large, else medium); don't guess terminal
+  proportions. Wrap long content in a `<scrollbox>` with the footer line outside it, and always
+  render the numeric value next to a bar (never color/length alone).
+- Use semantic theme tokens for coloring (`usePlugin().theme`) — the current code uses them
+  throughout, including category colors from `theme.categorical`; if you ever fall back to hex,
   verify contrast in both light and dark themes.
 
 ### Process & safety
-- Two common sources of "my plugin randomly broke": the stale background service (§1.6) and
+- Two common sources of "my plugin randomly broke": a stale background service (§1.6) and
   **npm peer conflicts** at install time (pin the exact peer versions the plugin package uses).
 - Node 24 runs TypeScript tests directly via type stripping (`node --test "test/*.test.ts"` —
   note: pass a glob, *not* a directory; `node --test test/` fails with MODULE_NOT_FOUND).
   Keep the tested layer pure so you never need a TUI to test logic.
-- When debugging plugin loading: `opencode plugin list` (server-side, against the *running*
-  service), `opencode --print-logs --log-level debug run --standalone …` (fresh-process truth),
-  and the log file at `~/.local/share/opencode/log/opencode.log` (cross-check timestamps —
-  stale error lines predate your fix).
-- Strings in the binary are a legitimate last-resort API reference when docs and types disagree
-  (`strings ~/.opencode/bin/opencode | grep …`). It's how the directory feature-detection
-  convention was confirmed. Careful: output is enormous — always pipe through `grep -oE`.
+- When debugging plugin loading: `opencode plugin list` (shows server-loaded plugins *and*
+  local config/discovery entries, so it's evidence about local registration — V5),
+  `opencode --print-logs --log-level debug run --standalone …` (fresh-process truth), and the
+  log file at `~/.local/share/opencode/log/opencode.log` (cross-check timestamps — stale error
+  lines predate your fix).
+- Strings in the binary are a genuine **last-resort** API reference when docs and types disagree
+  (`strings ~/.opencode/bin/opencode | grep …`) — but note the directory feature-detection
+  convention is now documented (V3), so start with the docs. Careful: output is enormous —
+  always pipe through `grep -oE`.
 
 ### Design
 - A slash command registered via a CLI plugin's `keymap.layer` **does not enter the prompt
@@ -348,9 +389,11 @@ config files are what's broken on 2.1.4.
 
 - Whether `SessionInfo.tokens` for a parent includes subagent usage (we display subagents
   separately and never add them into session totals, so either answer renders honestly).
-- Whether config-file `plugins` entries support relative paths or only package names on 2.1.4
-  (absolute local paths are confirmed inert).
-- Event-driven auto-refresh while the dialog is open (`data.on("session.execution.succeeded")`
-  debounced) — `r` manual refresh is the current baseline.
+- Whether `dialog.set()` before the promise-based `select()` has any effect — **unverified**:
+  the select frame has no measurable borders, so the stats selector was left at the host
+  default size rather than guessing (V9).
+- Whether the host bounds dialog height such that the `<scrollbox>` actually activates on small
+  terminals — worth watching on 80×24.
 - npm publish + `cli.json` package-name registration as the stable distribution path; the
-  current shim install is machine-specific by design and re-runs after a repo move.
+  current config-path install stores the repo's absolute path, so it is machine-specific by
+  design and must be re-run after a repo move.
