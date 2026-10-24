@@ -1,0 +1,36 @@
+{
+  "name": "opencode-tokens-usage",
+  "version": "0.1.0",
+  "description": "Token usage statistics for OpenCode v2 sessions — /tokens_usage, no LLM in the loop",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/tui.tsx"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\"",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@opencode/client": "^2.1.4",
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependencies": {
+    "@opencode/theme": "2.1.4",
+    "@opentui/core": ">=0.6.8",
+    "@opentui/solid": ">=0.6.8",
+    "solid-js": ">=1.9.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@opentui/core": "^0.6.8",
+    "@opentui/solid": "^0.6.8",
+    "@types/node": "^26.6.5",
+    "solid-js": "^1.9.12",
+    "typescript": "^7.0.2"
+  }
+}
