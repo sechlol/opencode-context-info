@@ -4,13 +4,16 @@
 //
 // The view renders inside the host's dialog content area, whose width comes
 // from the DialogSize preset (fixed columns — chosen to fit the terminal by
-// tui.tsx); the root box fills that width. Colors come from semantic theme
+// tui.tsx); the root box fills that width. The host does not bound the
+// dialog's height (auto-height, centered), so sections live in a scrollbox
+// whose terminal-derived maxHeight keeps long content scrolling inside the
+// dialog instead of running off the screen. Colors come from semantic theme
 // tokens via usePlugin() — no hardcoded hex.
 //
 // OpenTUI note: <text> accepts fg/attributes directly (TextOptions), but
 // <span> only honors style={{ fg, bg, attributes }} (see reconciler setProperty).
 
-import { ErrorBoundary, For, Show } from "solid-js"
+import { ErrorBoundary, For, Show, createSignal, onCleanup } from "solid-js"
 import { usePlugin } from "@opencode/plugin/tui"
 import type { StatsViewModel, StepRow } from "./types.ts"
 import { formatClock, formatCompact, formatCost, formatNumber, formatRange, truncateMiddle } from "./format.ts"
@@ -278,12 +281,45 @@ function Empty() {
   )
 }
 
+/**
+ * Terminal rows, tracked across resizes. The host renders custom dialogs
+ * auto-height (its dialog box gets only a width preset, never a height), so
+ * nothing upstream bounds our content area — the scrollbox has to carry its
+ * own vertical bound derived from the terminal. Returns undefined when the
+ * renderer is unavailable, in which case the bound is omitted and content
+ * simply flows (it can never collapse to zero height this way).
+ */
+function useScrollMaxHeight(): () => number | undefined {
+  const renderer = usePlugin().renderer
+  const [rows, setRows] = createSignal<number | undefined>(renderer?.height)
+  try {
+    const onResize = () => setRows(renderer?.height)
+    renderer?.on("resize", onResize)
+    onCleanup(() => renderer?.off("resize", onResize))
+  } catch {
+    // No resize stream — the value captured at render time still applies.
+  }
+  // Rows reserved outside the scrollbox: the host dialog's paddingTop (1),
+  // the root box's paddingTop (1), the gap above the footer (1), the footer
+  // line (1), and 2 rows of margin around the centered dialog. Clamped to ≥1
+  // so the scrollbox always keeps at least one row of content visible.
+  return () => {
+    const r = rows()
+    return r === undefined ? undefined : Math.max(1, r - 6)
+  }
+}
+
 export function StatsView(props: StatsViewProps) {
   const tones = useTones()
   const model = () => (props.state.status === "ready" ? props.state.model : props.state.previous)
-  // The dialog's content area has a definite width (the chosen preset) and
-  // auto height; the root box fills the width and paints the background, and
-  // content flows. A fixed per-column layout keeps lines inside the preset.
+  // Layout: the dialog content area has a definite width (the chosen preset)
+  // but auto height, so the root box fills the width, paints the background,
+  // and caps the scrollbox with a terminal-derived maxHeight. The scrollbox
+  // scrolls/clips the sections when they exceed that bound (flexGrow/shrink
+  // also let it take or give space if a host ever bounds the dialog box
+  // itself); when nothing constrains it, it sizes to its content and renders
+  // fully. The footer sits outside the scrollbox so it stays visible below.
+  const scrollMaxHeight = useScrollMaxHeight()
   const tonesBg = tones.bg
   return (
     <ErrorBoundary
@@ -295,29 +331,39 @@ export function StatsView(props: StatsViewProps) {
       )}
     >
       <box flexDirection="column" width="100%" flexGrow={1} backgroundColor={tonesBg} paddingLeft={2} paddingTop={1} gap={1}>
-        <Show when={props.state.status === "loading" && !model()}>
-          <text fg={tones.dim}>Loading token usage…</text>
-        </Show>
-        <Show when={props.state.status === "error" && !model()}>
-          <box flexDirection="column">
-            <text fg={tones.err}>{(props.state as { message: string }).message}</text>
-            <text fg={tones.dim}>esc close · r retry</text>
-          </box>
-        </Show>
-        <Show when={model()}>
-          {(m) => (
-            <Show when={m().attributedSteps > 0} fallback={<Empty />}>
-              <Header model={m()} />
-              <Composition model={m()} />
-              <ContextWindow model={m()} />
-              <ByModel model={m()} />
-              <Steps model={m()} />
-              <Subagents model={m()} />
-              <Project model={m()} />
-              <Warnings model={m()} />
-            </Show>
-          )}
-        </Show>
+        <scrollbox
+          width="100%"
+          flexGrow={1}
+          flexShrink={1}
+          minHeight={0}
+          maxHeight={scrollMaxHeight()}
+          contentOptions={{ gap: 1 }}
+          focused
+        >
+          <Show when={props.state.status === "loading" && !model()}>
+            <text fg={tones.dim}>Loading token usage…</text>
+          </Show>
+          <Show when={props.state.status === "error" && !model()}>
+            <box flexDirection="column">
+              <text fg={tones.err}>{(props.state as { message: string }).message}</text>
+              <text fg={tones.dim}>esc close · r retry</text>
+            </box>
+          </Show>
+          <Show when={model()}>
+            {(m) => (
+              <Show when={m().attributedSteps > 0} fallback={<Empty />}>
+                <Header model={m()} />
+                <Composition model={m()} />
+                <ContextWindow model={m()} />
+                <ByModel model={m()} />
+                <Steps model={m()} />
+                <Subagents model={m()} />
+                <Project model={m()} />
+                <Warnings model={m()} />
+              </Show>
+            )}
+          </Show>
+        </scrollbox>
         <text fg={tones.faint}>{props.refreshing ? "refreshing…" : "esc close · r refresh"}</text>
       </box>
     </ErrorBoundary>
